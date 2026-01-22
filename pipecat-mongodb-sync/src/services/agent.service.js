@@ -106,7 +106,7 @@ class AgentService {
         // Retry without upsert
         await Agent.updateOne(
           { agent_id: agentId },
-          { $set: { ...agentDoc, last_synced_at: now } }
+          { $set: agentDoc }
         );
         return { success: true, created: false, updated: true, agent_id: agentId, agent_name: agentName };
       }

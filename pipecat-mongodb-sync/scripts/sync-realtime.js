@@ -40,11 +40,19 @@ const Agent = sequelize.define('Agent', {
     last_synced: {
         type: DataTypes.DATE,
         defaultValue: DataTypes.NOW
-    }
+    },
+    // New Fields
+    region: DataTypes.STRING,
+    ready: DataTypes.BOOLEAN,
+    active_deployment_id: DataTypes.STRING,
+    active_deployment_ready: DataTypes.BOOLEAN,
+    auto_scaling: DataTypes.JSONB, // Stores { maxReplicas, minReplicas }
+    deployment: DataTypes.JSONB,   // Stores full deployment object
+    agent_profile: DataTypes.STRING
 }, {
     tableName: 'Agents',
     timestamps: true,
-    underscored: true // Use snake_case for DB columns (created_at)
+    underscored: true
 });
 
 const Session = sequelize.define('Session', {
@@ -59,7 +67,7 @@ const Session = sequelize.define('Session', {
     ended_at: DataTypes.DATE,
     status: DataTypes.STRING,
     bot_start_seconds: {
-        type: DataTypes.FLOAT, // Float for seconds
+        type: DataTypes.INTEGER,
         defaultValue: 0
     },
     cold_start: {
@@ -67,13 +75,18 @@ const Session = sequelize.define('Session', {
         defaultValue: false
     },
     duration_seconds: {
-        type: DataTypes.FLOAT,
+        type: DataTypes.INTEGER,
         defaultValue: 0
     },
     conversation_count: {
         type: DataTypes.INTEGER,
         defaultValue: 0
     },
+    // New Fields
+    service_id: DataTypes.STRING,
+    organization_id: DataTypes.STRING,
+    deployment_id: DataTypes.STRING,
+    completion_status: DataTypes.STRING,
     last_synced: {
         type: DataTypes.DATE,
         defaultValue: DataTypes.NOW
@@ -244,12 +257,23 @@ function parseContextLog(logMessage) {
 async function syncAgents(client) {
     const agents = await client.getAllAgents();
     for (const agent of agents) {
+        // Calculate session count based on what we have synced (or rely on API total if available)
+        // Since we filter by date, let's count what we have in DB for accuracy relative to our dashboard
+        const sessionCount = await Session.count({ where: { agent_id: agent.id } });
+
         // Sequelize upsert
         await Agent.upsert({
             agent_id: agent.id,
             name: agent.name,
+            region: agent.region,
+            ready: agent.ready,
+            active_deployment_id: agent.activeDeploymentId,
+            active_deployment_ready: agent.activeDeploymentReady,
+            auto_scaling: agent.autoScaling,
+            deployment: agent.deployment,
+            agent_profile: agent.agentProfile,
+            session_count: sessionCount, // Update with actual DB count
             last_synced: new Date()
-            // session_count: updated via logic elsewhere or defaults
         });
     }
     return agents;
@@ -280,6 +304,10 @@ async function syncSessions(client, agents) {
                 bot_start_seconds: session.botStartSeconds || 0,
                 cold_start: session.coldStart || false,
                 duration_seconds: durationSeconds,
+                service_id: session.serviceId,
+                organization_id: session.organizationId,
+                deployment_id: session.deploymentId,
+                completion_status: session.completionStatus,
                 last_synced: new Date()
             });
         }
