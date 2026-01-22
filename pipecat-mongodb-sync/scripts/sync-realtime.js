@@ -32,7 +32,6 @@ const Agent = sequelize.define('Agent', {
         type: DataTypes.STRING,
         allowNull: false
     },
-    // Timestamps created_at/updated_at are handled automatically by Sequelize
     session_count: {
         type: DataTypes.INTEGER,
         defaultValue: 0
@@ -41,17 +40,26 @@ const Agent = sequelize.define('Agent', {
         type: DataTypes.DATE,
         defaultValue: DataTypes.NOW
     },
+    // Explicit timestamp fields (from Pipecat API)
+    created_at: {
+        type: DataTypes.DATE,
+        allowNull: true
+    },
+    updated_at: {
+        type: DataTypes.DATE,
+        allowNull: true
+    },
     // New Fields
     region: DataTypes.STRING,
     ready: DataTypes.BOOLEAN,
     active_deployment_id: DataTypes.STRING,
     active_deployment_ready: DataTypes.BOOLEAN,
-    auto_scaling: DataTypes.JSONB, // Stores { maxReplicas, minReplicas }
-    deployment: DataTypes.JSONB,   // Stores full deployment object
+    auto_scaling: DataTypes.JSONB,
+    deployment: DataTypes.JSONB,
     agent_profile: DataTypes.STRING
 }, {
     tableName: 'Agents',
-    timestamps: true,
+    timestamps: false,  // Disable auto-management
     underscored: true
 });
 
@@ -257,11 +265,10 @@ function parseContextLog(logMessage) {
 async function syncAgents(client) {
     const agents = await client.getAllAgents();
     for (const agent of agents) {
-        // Calculate session count based on what we have synced (or rely on API total if available)
-        // Since we filter by date, let's count what we have in DB for accuracy relative to our dashboard
+        // Calculate session count based on what we have synced
         const sessionCount = await Session.count({ where: { agent_id: agent.id } });
 
-        // Sequelize upsert
+        // Sequelize upsert with explicit timestamp mapping
         await Agent.upsert({
             agent_id: agent.id,
             name: agent.name,
@@ -272,7 +279,9 @@ async function syncAgents(client) {
             auto_scaling: agent.autoScaling,
             deployment: agent.deployment,
             agent_profile: agent.agentProfile,
-            session_count: sessionCount, // Update with actual DB count
+            session_count: sessionCount,
+            created_at: agent.createdAt ? new Date(agent.createdAt) : new Date(),
+            updated_at: agent.updatedAt ? new Date(agent.updatedAt) : new Date(),
             last_synced: new Date()
         });
     }

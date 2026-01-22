@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import axios from 'axios';
+import api from '../api/client';
 import { useNavigate } from 'react-router-dom';
 import { Users, MessageSquare, TrendingUp, Search, ChevronLeft, ChevronRight, ArrowUpDown } from 'lucide-react';
 
@@ -29,20 +29,16 @@ export default function Dashboard() {
             });
 
             const url = `/api/agents?${params.toString()}`;
-            console.log('Request URL:', url);
 
-            const res = await axios.get(url);
-            console.log('Response:', res.data);
+            const res = await api.get(url);
 
             // Handle response safely
             if (res.data && res.data.data && Array.isArray(res.data.data)) {
                 setAgents(res.data.data);
                 setTotalPages(res.data.pagination?.totalPages || 1);
                 setTotalAgents(res.data.pagination?.total || 0);
-                console.log('Set agents:', res.data.data.length);
             } else {
                 // Fallback for empty response
-                console.warn('Invalid response format:', res.data);
                 setAgents([]);
                 setTotalPages(1);
                 setTotalAgents(0);
@@ -61,7 +57,7 @@ export default function Dashboard() {
 
     const fetchStats = async () => {
         try {
-            const res = await axios.get('/api/stats');
+            const res = await api.get('/api/stats');
             if (res.data) {
                 setStats(res.data);
             }
@@ -104,7 +100,7 @@ export default function Dashboard() {
             {/* Left Sidebar */}
             <aside className="dashboard-sidebar">
                 <div className="sidebar-header">
-                    <img src="/logo.png" alt="FarmVaidya" className="sidebar-logo" />
+                    <img src="/logo.png" alt="FarmVaidya" className="sidebar-logo" style={{ cursor: 'pointer' }} onClick={() => navigate('/')} />
                 </div>
 
                 <div className="stats-vertical">

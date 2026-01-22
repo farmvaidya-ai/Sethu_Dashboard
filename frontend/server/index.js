@@ -50,7 +50,6 @@ app.post('/api/login', (req, res) => {
 
 // Get Agents with Pagination and Sorting
 app.get('/api/agents', async (req, res) => {
-    console.log('GET /api/agents - Query:', req.query);
     try {
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 10;
@@ -128,7 +127,7 @@ app.get('/api/stats', async (req, res) => {
         const [agentsRes, sessionsRes, completedRes] = await Promise.all([
             pool.query('SELECT COUNT(*) FROM "Agents"'),
             pool.query('SELECT COUNT(*) FROM "Sessions"'),
-            pool.query("SELECT COUNT(*) FROM \"Sessions\" WHERE status ILIKE '%success%' OR status ILIKE '%completed%' OR status ILIKE '%HTTP_COMPLETED%'")
+            pool.query("SELECT COUNT(*) FROM \"Sessions\" WHERE status = 'HTTP_COMPLETED'")
         ]);
 
         const totalAgents = parseInt(agentsRes.rows[0].count);
@@ -172,13 +171,28 @@ app.get('/api/sessions', async (req, res) => {
 
         const countQuery = `SELECT COUNT(*) FROM "Sessions" WHERE agent_id = $1 ${search ? `AND session_id ILIKE $2` : ''}`;
 
+        // Agent specific stats query
+        const agentStatsQuery = `
+            SELECT 
+                COUNT(*) as total_sessions,
+                COUNT(*) FILTER (WHERE status = 'HTTP_COMPLETED') as success_sessions,
+                COUNT(*) FILTER (WHERE conversation_count = 0 OR conversation_count IS NULL) as zero_turn_sessions
+            FROM "Sessions"
+            WHERE agent_id = $1
+        `;
+
         query += ` ORDER BY "${sortBy}" ${dbSortOrder} LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}`;
         params.push(limitNum, offset);
 
-        const [dataRes, countRes] = await Promise.all([
+        const [dataRes, countRes, agentStatsRes] = await Promise.all([
             pool.query(query, params),
-            pool.query(countQuery, params.slice(0, paramCount))
+            pool.query(countQuery, params.slice(0, paramCount)),
+            pool.query(agentStatsQuery, [agent_id])
         ]);
+
+        const totalAgentSessions = parseInt(agentStatsRes.rows[0].total_sessions || 0);
+        const successAgentSessions = parseInt(agentStatsRes.rows[0].success_sessions || 0);
+        const zeroTurnSessions = parseInt(agentStatsRes.rows[0].zero_turn_sessions || 0);
 
         res.json({
             data: dataRes.rows,
@@ -187,6 +201,12 @@ app.get('/api/sessions', async (req, res) => {
                 limit: limitNum,
                 total: parseInt(countRes.rows[0].count),
                 totalPages: Math.ceil(parseInt(countRes.rows[0].count) / limitNum)
+            },
+            stats: {
+                total: totalAgentSessions,
+                success: successAgentSessions,
+                zeroTurns: zeroTurnSessions,
+                successRate: totalAgentSessions > 0 ? ((successAgentSessions / totalAgentSessions) * 100).toFixed(1) : 0
             }
         });
     } catch (error) {

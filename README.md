@@ -101,6 +101,62 @@ dashboard/
     └── package.json               # NPM Scripts for Sync
 ```
 
+## 🌐 Deployment
+
+### Environment Configuration
+The application uses environment variables for flexible deployment. Configure these in your `.env` file:
+
+#### Frontend Environment Variables
+```env
+# Database Configuration
+POSTGRES_HOST=your-database-host.postgres.database.azure.com
+POSTGRES_PORT=5432
+POSTGRES_DB=postgres
+POSTGRES_USER=your-username
+POSTGRES_PASSWORD=your-password
+POSTGRES_SSL=true
+
+# Server Configuration
+PORT=3000
+
+# API URL Configuration
+# For local development:
+VITE_API_URL=http://localhost:3000
+
+# For production:
+# VITE_API_URL=https://your-api-domain.com
+```
+
+### Deploying to Production
+
+1. **Update `.env` file**:
+   - Set `VITE_API_URL` to your production API endpoint
+   - Configure PostgreSQL credentials for production database
+
+2. **Build the frontend**:
+   ```bash
+   cd frontend
+   npm run build
+   ```
+
+3. **Deploy the API server**:
+   - The Express server in `server/index.js` can be deployed to any Node.js hosting service
+   - Ensure the `PORT` environment variable is set correctly
+   - Configure PostgreSQL credentials for your production database
+
+4. **Deploy the frontend build**:
+   - The `dist/` folder contains the production build
+   - Deploy to any static hosting service (Vercel, Netlify, Azure Static Web Apps, etc.)
+   - Ensure `VITE_API_URL` points to your deployed API server
+
+### Quick Deployment Checklist
+- [ ] Update `VITE_API_URL` in `.env` to production API URL
+- [ ] Configure production PostgreSQL credentials
+- [ ] Build frontend: `npm run build`
+- [ ] Deploy API server with correct `PORT` setting
+- [ ] Deploy static files from `dist/` folder
+- [ ] Test all API endpoints are accessible
+
 ## 🛠️ Troubleshooting
 
 - **Database Connection Errors**:

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import axios from 'axios';
+import api from '../api/client';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, User, Bot, Download, Copy, Check, ChevronDown } from 'lucide-react';
 
@@ -21,7 +21,7 @@ export default function SessionDetails() {
         try {
             // Fetch session details (should always exist)
             try {
-                const sessRes = await axios.get(`/api/session/${sessionId}`);
+                const sessRes = await api.get(`/api/session/${sessionId}`);
                 setSession(sessRes.data);
             } catch (sessErr) {
                 console.error("Error fetching session:", sessErr);
@@ -29,7 +29,7 @@ export default function SessionDetails() {
 
             // Fetch conversation details (might return 404 if no turns)
             try {
-                const convRes = await axios.get(`/api/conversation/${sessionId}`);
+                const convRes = await api.get(`/api/conversation/${sessionId}`);
                 setConversation(convRes.data);
             } catch (convErr) {
                 console.log("No conversation logs for this session (expected if turns = 0)");
@@ -46,8 +46,12 @@ export default function SessionDetails() {
         if (!dateStr) return '-';
         const date = new Date(dateStr);
         return date.toLocaleString('en-US', {
-            month: 'short', day: 'numeric', year: 'numeric',
-            hour: '2-digit', minute: '2-digit', second: '2-digit'
+            month: 'short',
+            day: 'numeric',
+            year: 'numeric',
+            hour: 'numeric',
+            minute: '2-digit',
+            hour12: true
         });
     };
 
@@ -57,16 +61,26 @@ export default function SessionDetails() {
         return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     };
 
-    // Format seconds to HH:MM:SS
+    const formatDate = (dateStr) => {
+        if (!dateStr) return '-';
+        const date = new Date(dateStr);
+        return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    };
+
+    // Format seconds to readable time with units
     const formatSecondsToTime = (seconds) => {
         if (!seconds && seconds !== 0) return '-';
         const hrs = Math.floor(seconds / 3600);
         const mins = Math.floor((seconds % 3600) / 60);
-        const secs = seconds % 60;
+        const secs = Math.floor(seconds % 60);
+
         if (hrs > 0) {
-            return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+            return `${hrs}h ${mins}m ${secs}s`;
+        } else if (mins > 0) {
+            return `${mins}m ${secs}s`;
+        } else {
+            return `${secs}s`;
         }
-        return `${mins}:${secs.toString().padStart(2, '0')}`;
     };
 
     // Copy conversation to clipboard
@@ -140,7 +154,7 @@ export default function SessionDetails() {
             {/* Left Sidebar - Session Info */}
             <aside className="dashboard-sidebar">
                 <div className="sidebar-header">
-                    <img src="/logo.png" alt="FarmVaidya" className="sidebar-logo" />
+                    <img src="/logo.png" alt="FarmVaidya" className="sidebar-logo" style={{ cursor: 'pointer' }} onClick={() => navigate('/')} />
                 </div>
 
                 <div className="session-info-sidebar" style={{ flex: 1, overflowY: 'auto' }}>
@@ -173,6 +187,10 @@ export default function SessionDetails() {
                     <div className="info-row">
                         <span className="info-label">Total Turns</span>
                         <span className="info-value">{conversation?.total_turns || conversation?.turns?.length || 0}</span>
+                    </div>
+                    <div className="info-row">
+                        <span className="info-label">Last Synced</span>
+                        <span className="info-value">{formatDateTime(session?.last_synced)}</span>
                     </div>
                 </div>
 
