@@ -18,7 +18,7 @@ const logger = require(path.join(__dirname, '../src/utils/logger'));
 
 // ============ CONFIGURATION ============
 const SYNC_START_DATE = new Date('2026-01-01T00:00:00Z');
-const POLL_INTERVAL_MS = 60000; // Run every 60 seconds
+const POLL_INTERVAL_MS = 5000; // Run every 5 seconds
 
 // ============ MODELS (Sequelize) ============
 
@@ -290,35 +290,73 @@ async function syncAgents(client) {
 
 async function syncSessions(client, agents) {
     for (const agent of agents) {
-        const sessions = await client.getAllSessionsForAgent(agent.name);
+        // INCREMENTAL: Get the most recent session start time we have for this agent
+        const latestSession = await Session.findOne({
+            where: { agent_id: agent.id },
+            order: [['started_at', 'DESC']]
+        });
 
-        for (const session of sessions) {
-            const startedAt = session.createdAt ? new Date(session.createdAt) : new Date();
-            if (startedAt < SYNC_START_DATE) continue;
+        const stopThreshold = latestSession
+            ? new Date(latestSession.started_at.getTime() - (60 * 60 * 1000))
+            : SYNC_START_DATE;
 
-            const endedAt = session.endedAt ? new Date(session.endedAt) : null;
-            let durationSeconds = 0;
-            if (endedAt && startedAt) {
-                durationSeconds = Math.round((endedAt - startedAt) / 1000);
+        // FETCH PAGE 1 TO DETECT ORDER
+        const initialResponse = await client.getAgentSessions(agent.name, 1, 100);
+        const initialSessions = initialResponse.data || [];
+        if (initialSessions.length === 0) continue;
+
+        // Detect Order: If first session is older than last session on page, it's Ascending (Oldest First)
+        const isAscending = initialSessions.length > 1 &&
+            new Date(initialSessions[0].createdAt) < new Date(initialSessions[initialSessions.length - 1].createdAt);
+
+        const totalSessions = initialResponse.total || initialResponse.total_count || initialSessions.length;
+        const totalPages = Math.ceil(totalSessions / 100);
+
+        let page = isAscending ? totalPages : 1;
+        let stopFetching = false;
+
+        while (page >= 1 && !stopFetching) {
+            const response = (page === 1) ? initialResponse : await client.getAgentSessions(agent.name, page, 100);
+            const sessions = response.data || [];
+
+            // If Ascending, we process the page backwards (newest in page first)
+            const sessionsToProcess = isAscending ? [...sessions].reverse() : sessions;
+
+            for (const session of sessionsToProcess) {
+                const startedAt = session.createdAt ? new Date(session.createdAt) : new Date();
+
+                if (startedAt < stopThreshold) {
+                    stopFetching = true;
+                    break;
+                }
+
+                const endedAt = session.endedAt ? new Date(session.endedAt) : null;
+                let durationSeconds = 0;
+                if (endedAt && startedAt) {
+                    durationSeconds = Math.round((endedAt - startedAt) / 1000);
+                }
+
+                await Session.upsert({
+                    session_id: session.sessionId,
+                    agent_id: agent.id,
+                    agent_name: agent.name,
+                    started_at: startedAt,
+                    ended_at: endedAt,
+                    status: session.completionStatus || 'unknown',
+                    bot_start_seconds: session.botStartSeconds || 0,
+                    cold_start: session.coldStart || false,
+                    duration_seconds: durationSeconds,
+                    service_id: session.serviceId,
+                    organization_id: session.organizationId,
+                    deployment_id: session.deploymentId,
+                    completion_status: session.completionStatus,
+                    last_synced: new Date()
+                });
             }
 
-            // Sequelize Upsert
-            await Session.upsert({
-                session_id: session.sessionId,
-                agent_id: agent.id,
-                agent_name: agent.name,
-                started_at: startedAt,
-                ended_at: endedAt,
-                status: session.completionStatus || 'unknown',
-                bot_start_seconds: session.botStartSeconds || 0,
-                cold_start: session.coldStart || false,
-                duration_seconds: durationSeconds,
-                service_id: session.serviceId,
-                organization_id: session.organizationId,
-                deployment_id: session.deploymentId,
-                completion_status: session.completionStatus,
-                last_synced: new Date()
-            });
+            if (isAscending) page--; else page++;
+            if (page === 0) break;
+            await client.delay(100);
         }
     }
 }
@@ -327,21 +365,42 @@ async function syncConversations(client, agents) {
     let totalSynced = 0;
 
     for (const agent of agents) {
-        let page = 1;
-        const limit = 100;
-        const sessionContexts = new Map();
-        let stopFetchingForAgent = false;
+        const latestConversation = await Conversation.findOne({
+            where: { agent_id: agent.id },
+            order: [['last_message_at', 'DESC']]
+        });
 
-        while (!stopFetchingForAgent) {
-            const response = await client.getAgentLogs(agent.name, null, page, limit, 'Generating chat');
+        const stopThreshold = latestConversation
+            ? new Date(latestConversation.last_message_at.getTime() - (5 * 60 * 1000))
+            : SYNC_START_DATE;
+
+        // FETCH PAGE 1 TO DETECT ORDER
+        const initialResponse = await client.getAgentLogs(agent.name, null, 1, 100, 'Generating chat');
+        const initialLogs = initialResponse.data || [];
+        if (initialLogs.length === 0) continue;
+
+        // Detect Order
+        const isAscending = initialLogs.length > 1 &&
+            new Date(initialLogs[0].timestamp) < new Date(initialLogs[initialLogs.length - 1].timestamp);
+
+        const totalLogs = initialResponse.total || initialLogs.length;
+        const totalPages = Math.ceil(totalLogs / 100);
+
+        let page = isAscending ? totalPages : 1;
+        let stopFetchingForAgent = false;
+        const sessionContexts = new Map();
+
+        while (page >= 1 && !stopFetchingForAgent) {
+            const response = (page === 1) ? initialResponse : await client.getAgentLogs(agent.name, null, page, 100, 'Generating chat');
             const logs = response.data || [];
 
-            if (!logs || logs.length === 0) break;
+            // If Ascending, we process the page backwards (newest in page first)
+            const logsToProcess = isAscending ? [...logs].reverse() : logs;
 
-            for (const log of logs) {
+            for (const log of logsToProcess) {
                 const logTime = new Date(log.timestamp);
 
-                if (logTime < SYNC_START_DATE) {
+                if (logTime < stopThreshold) {
                     stopFetchingForAgent = true;
                     break;
                 }
@@ -366,14 +425,9 @@ async function syncConversations(client, agents) {
                 }
             }
 
-            if (stopFetchingForAgent) {
-                logger.info(`    Reached logs older than ${SYNC_START_DATE.toISOString()}. Stopping fetch for ${agent.name}.`);
-                break;
-            }
-
-            if (!response.hasMore || logs.length < limit) break;
-            page++;
-            await client.delay(50);
+            if (isAscending) page--; else page++;
+            if (page === 0) break;
+            await client.delay(100);
         }
 
         for (const [sessionId, { log: contextLog, time }] of sessionContexts) {
@@ -381,41 +435,29 @@ async function syncConversations(client, agents) {
                 const turns = parseContextLog(contextLog);
                 if (turns.length === 0) continue;
 
-                // Check existing logic (optimized query)
                 const existing = await Conversation.findOne({ where: { session_id: sessionId } });
                 if (existing && existing.turns.length === turns.length && existing.last_message_at >= time) {
                     continue;
                 }
 
-                // Verify Session exists to prevent Foreign Key Violation
-                // (Cases where session started in 2025 but logs in 2026)
                 const parentSession = await Session.findOne({ where: { session_id: sessionId } });
-                if (!parentSession) {
-                    // logger.warn(`Skipping conversation for session ${sessionId} (Session not found/skipped due to date filter)`);
-                    continue;
-                }
+                if (!parentSession) continue;
 
                 await Conversation.upsert({
                     session_id: sessionId,
                     agent_id: agent.id,
                     agent_name: agent.name,
-                    turns: turns, // Sequelize handles JSONB serialization
+                    turns: turns,
                     total_turns: turns.length,
                     first_message_at: turns[0]?.timestamp || time,
                     last_message_at: time,
                     last_synced: new Date()
                 });
 
-                // Update session count
                 await Session.update(
                     { conversation_count: turns.length },
                     { where: { session_id: sessionId } }
                 );
-
-                // Update agent session count - tricky in SQL, maybe just count rows?
-                // For now, let's just increment or better yet, recalculate periodically.
-                // Or just update the Agent record if we were tracking it there explicitly.
-                // We'll skip complex count updates for now to keep it fast, rely on SQL queries for counts.
 
                 totalSynced++;
             } catch (e) {
@@ -434,6 +476,7 @@ async function runSyncCycle() {
     try {
         const client = new PipecatClient();
         const agents = await syncAgents(client);
+        // Start incremental sync
         await syncSessions(client, agents);
         await syncConversations(client, agents);
     } catch (e) {

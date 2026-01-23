@@ -89,9 +89,17 @@ export default function AgentDetails() {
 
 
     useEffect(() => {
-        setLoading(true);
+        if (sessions.length === 0) setLoading(true);
         fetchSessions();
         fetchAgentDetails();
+
+        // Polling every 30 seconds
+        const interval = setInterval(() => {
+            fetchSessions();
+            fetchAgentDetails();
+        }, 5000);
+
+        return () => clearInterval(interval);
     }, [fetchSessions, fetchAgentDetails]);
 
     // Debounce search

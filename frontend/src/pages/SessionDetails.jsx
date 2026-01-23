@@ -13,11 +13,17 @@ export default function SessionDetails() {
     const navigate = useNavigate();
 
     useEffect(() => {
-        fetchData();
+        fetchData(true); // First load with spinner
+
+        const interval = setInterval(() => {
+            fetchData(false); // Background update
+        }, 5000);
+
+        return () => clearInterval(interval);
     }, [sessionId]);
 
-    const fetchData = async () => {
-        setLoading(true);
+    const fetchData = async (showLoading = true) => {
+        if (showLoading) setLoading(true);
         try {
             // Fetch session details (should always exist)
             try {
