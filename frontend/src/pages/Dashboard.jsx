@@ -55,7 +55,7 @@ export default function Dashboard() {
         }
     }, [currentPage, sortBy, sortOrder, searchTerm, navigate]);
 
-    const fetchStats = async () => {
+    const fetchStats = useCallback(async () => {
         try {
             const res = await api.get('/api/stats');
             if (res.data) {
@@ -64,16 +64,22 @@ export default function Dashboard() {
         } catch (err) {
             console.error('Error fetching stats:', err);
         }
-    };
-
-    useEffect(() => {
-        fetchStats();
     }, []);
 
     useEffect(() => {
-        setLoading(true);
+        // Only show full loading spinner if we have no data yet
+        if (agents.length === 0) setLoading(true);
+
+        fetchStats();
         fetchAgents();
-    }, [fetchAgents]);
+
+        const interval = setInterval(() => {
+            fetchStats();
+            fetchAgents();
+        }, 5000);
+
+        return () => clearInterval(interval);
+    }, [fetchStats, fetchAgents]); // Now stable
 
     // Debounce search
     useEffect(() => {
