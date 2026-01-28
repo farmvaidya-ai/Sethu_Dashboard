@@ -17,7 +17,8 @@ const PipecatClient = require(path.join(__dirname, '../src/config/pipecat'));
 const logger = require(path.join(__dirname, '../src/utils/logger'));
 const {
     extractSessionId,
-    parseContextLog
+    parseContextLog,
+    parseTTSLog
 } = require(path.join(__dirname, '../src/services/pipecat_normalization'));
 const { generateSummary } = require(path.join(__dirname, '../src/services/summary.service'));
 
@@ -297,21 +298,30 @@ async function syncConversations(client, agents) {
                 }
 
                 const msg = log.log || '';
-                if (!msg.includes('context [')) continue;
-
                 const sessionId = extractSessionId(msg);
                 if (!sessionId) continue;
 
-                const isUniversal = msg.includes('universal context');
+                if (!sessionContexts.has(sessionId)) {
+                    sessionContexts.set(sessionId, { contextLog: null, contextTime: null, ttsLog: null, ttsTime: null, isUniversal: false });
+                }
                 const current = sessionContexts.get(sessionId);
 
-                if (!current) {
-                    sessionContexts.set(sessionId, { log: msg, time: logTime, isUniversal });
-                } else {
-                    if (isUniversal && !current.isUniversal) {
-                        sessionContexts.set(sessionId, { log: msg, time: logTime, isUniversal });
-                    } else if (isUniversal === current.isUniversal && logTime > current.time) {
-                        sessionContexts.set(sessionId, { log: msg, time: logTime, isUniversal });
+                // Handle Context Log
+                if (msg.includes('context [')) {
+                    const isUniversal = msg.includes('universal context');
+
+                    if (!current.contextLog || (isUniversal && !current.isUniversal) || (isUniversal === current.isUniversal && logTime > current.contextTime)) {
+                        current.contextLog = msg;
+                        current.contextTime = logTime;
+                        current.isUniversal = isUniversal;
+                    }
+                }
+
+                // Handle TTS Log (capture potential final response)
+                if (msg.includes('Generating TTS [')) {
+                    if (!current.ttsTime || logTime > current.ttsTime) {
+                        current.ttsLog = msg;
+                        current.ttsTime = logTime;
                     }
                 }
             }
@@ -321,11 +331,27 @@ async function syncConversations(client, agents) {
             await client.delay(100);
         }
 
-        for (const [sessionId, { log: contextLog, time }] of sessionContexts) {
+        for (const [sessionId, { contextLog, contextTime, ttsLog, ttsTime }] of sessionContexts) {
             try {
+                if (!contextLog) continue;
+
                 const turns = parseContextLog(contextLog);
+
+                // Check if we have a newer TTS log that isn't in the turns
+                if (ttsLog && ttsTime > contextTime) {
+                    const lastTurn = turns[turns.length - 1];
+                    const ttsMessage = parseTTSLog(ttsLog);
+
+                    // If last turn has no assistant message, or if it does but it doesn't match this new one
+                    if (lastTurn && !lastTurn.assistant_message && ttsMessage) {
+                        logger.info(`Found missing final response for ${sessionId}, appending...`);
+                        lastTurn.assistant_message = ttsMessage;
+                    }
+                }
+
                 if (turns.length === 0) continue;
 
+                const time = contextTime; // Use context time as main reference
                 const existing = await Conversation.findOne({ where: { session_id: sessionId } });
                 // Skip if conversation exists with same turn count and is up to date
                 if (existing && existing.turns.length === turns.length && existing.last_message_at >= time) {
