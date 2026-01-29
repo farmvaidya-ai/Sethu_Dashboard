@@ -142,19 +142,22 @@ app.get('/api/stats', async (req, res) => {
             return res.json(statsCache);
         }
 
-        const [agentsRes, sessionsRes, completedRes] = await Promise.all([
+        const [agentsRes, sessionsRes, completedRes, durationRes] = await Promise.all([
             pool.query(`SELECT COUNT(*) FROM "${getTableName('Agents')}"`),
             pool.query(`SELECT COUNT(*) FROM "${getTableName('Sessions')}"`),
-            pool.query(`SELECT COUNT(*) FROM "${getTableName('Sessions')}" WHERE status = 'HTTP_COMPLETED'`)
+            pool.query(`SELECT COUNT(*) FROM "${getTableName('Sessions')}" WHERE status = 'HTTP_COMPLETED'`),
+            pool.query(`SELECT SUM(duration_seconds) as total_duration FROM "${getTableName('Sessions')}"`)
         ]);
 
         const totalAgents = parseInt(agentsRes.rows[0].count);
         const totalSessions = parseInt(sessionsRes.rows[0].count);
         const completedSessions = parseInt(completedRes.rows[0].count);
+        const totalDuration = parseInt(durationRes.rows[0].total_duration || 0);
 
         statsCache = {
             totalAgents,
             totalSessions,
+            totalDuration,
             successRate: totalSessions > 0 ? ((completedSessions / totalSessions) * 100).toFixed(1) : 0
         };
         statsCacheTime = now;
@@ -199,6 +202,7 @@ app.get('/api/sessions', async (req, res) => {
         const agentStatsQuery = `
             SELECT 
                 COUNT(*) as total_sessions,
+                SUM(duration_seconds) as total_duration,
                 COUNT(*) FILTER (WHERE status = 'HTTP_COMPLETED') as success_sessions,
                 COUNT(*) FILTER (WHERE conversation_count = 0 OR conversation_count IS NULL) as zero_turn_sessions
             FROM "${getTableName('Sessions')}"
@@ -217,6 +221,7 @@ app.get('/api/sessions', async (req, res) => {
         const totalAgentSessions = parseInt(agentStatsRes.rows[0].total_sessions || 0);
         const successAgentSessions = parseInt(agentStatsRes.rows[0].success_sessions || 0);
         const zeroTurnSessions = parseInt(agentStatsRes.rows[0].zero_turn_sessions || 0);
+        const totalDuration = parseInt(agentStatsRes.rows[0].total_duration || 0);
 
         res.json({
             data: dataRes.rows,
@@ -230,6 +235,7 @@ app.get('/api/sessions', async (req, res) => {
                 total: totalAgentSessions,
                 success: successAgentSessions,
                 zeroTurns: zeroTurnSessions,
+                totalDuration: totalDuration,
                 successRate: totalAgentSessions > 0 ? ((successAgentSessions / totalAgentSessions) * 100).toFixed(1) : 0
             }
         });
