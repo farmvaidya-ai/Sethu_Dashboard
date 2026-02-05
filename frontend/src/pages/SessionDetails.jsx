@@ -209,6 +209,35 @@ export default function SessionDetails() {
                             <span className="info-value">{formatDateTime(session?.last_synced)}</span>
                         </div>
 
+                        {/* Review Status Section */}
+                        <div style={{ marginTop: '1.5rem', paddingTop: '1rem', borderTop: '1px solid #eee' }}>
+                            <h4 style={{ marginBottom: '0.8rem', color: 'var(--primary)', fontSize: '0.95rem', fontWeight: '600' }}>Review Status</h4>
+                            <div className="info-row">
+                                <span className="info-label">Status</span>
+                                <span className="info-value" style={{
+                                    textTransform: 'capitalize',
+                                    color: conversation?.review_status === 'completed' ? '#28a745' :
+                                        conversation?.review_status === 'needs_review' ? '#ffc107' : '#6c757d'
+                                }}>
+                                    {conversation?.review_status?.replace('_', ' ') || 'Pending'}
+                                </span>
+                            </div>
+                            {conversation?.reviewed_by && (
+                                <>
+                                    <div className="info-row">
+                                        <span className="info-label">Reviewed By</span>
+                                        <span className="info-value" style={{ wordBreak: 'break-all' }}>
+                                            {conversation.reviewer_email || conversation.reviewed_by}
+                                        </span>
+                                    </div>
+                                    <div className="info-row">
+                                        <span className="info-label">Reviewed At</span>
+                                        <span className="info-value">{formatDateTime(conversation.reviewed_at)}</span>
+                                    </div>
+                                </>
+                            )}
+                        </div>
+
                         {session?.recordingUrl && (
                             <div className="info-row" style={{ flexDirection: 'column', alignItems: 'flex-start', marginTop: '1.5rem', gap: '0.8rem' }}>
                                 <span className="info-label" style={{ color: 'var(--primary)', fontWeight: 'bold' }}>Call Recording</span>

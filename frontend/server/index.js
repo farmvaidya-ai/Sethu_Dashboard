@@ -687,11 +687,12 @@ app.get('/api/sessions', async (req, res) => {
         const offset = (pageNum - 1) * limitNum;
         const dbSortOrder = sortOrder === 'asc' ? 'ASC' : 'DESC';
 
-        // Join with Conversations to get summary
+        // Join with Conversations to get summary and review status, and Users to get reviewer email
         let query = `
-            SELECT s.*, c.summary 
+            SELECT s.*, c.summary, c.review_status, c.reviewed_by, c.reviewed_at, u.email as reviewer_email
             FROM "${getTableName('Sessions')}" s 
             LEFT JOIN "${getTableName('Conversations')}" c ON s.session_id = c.session_id
+            LEFT JOIN "${getTableName('Users')}" u ON c.reviewed_by = u.user_id
             WHERE s.agent_id = $1
         `;
         let params = [agent_id];
@@ -847,7 +848,13 @@ CONTENT:
 app.get('/api/conversation/:sessionId', async (req, res) => {
     const { sessionId } = req.params;
     try {
-        const result = await pool.query(`SELECT * FROM "${getTableName('Conversations')}" WHERE session_id = $1`, [sessionId]);
+        const result = await pool.query(`
+            SELECT c.*, u.email as reviewer_email
+            FROM "${getTableName('Conversations')}" c
+            LEFT JOIN "${getTableName('Users')}" u ON c.reviewed_by = u.user_id
+            WHERE c.session_id = $1
+        `, [sessionId]);
+
         if (result.rows.length === 0) {
             return res.status(404).json({ error: "Conversation logs not found" });
         }
@@ -1011,21 +1018,40 @@ app.get('/api/users', async (req, res) => {
             if (user.role === 'super_admin') {
                 user.agents = allAgentIds;
                 user.agentCount = allAgentIds.length;
+                user.agentPermissions = {}; // Super admin has all permissions by default
             } else if (user.role === 'admin' && reqUser.role === 'super_admin') {
                 // For super_admin viewing an admin, show that admin's specifically assigned agents
-                const agentIds = await pool.query(`SELECT agent_id FROM "${getTableName('User_Agents')}" WHERE user_id = $1`, [user.user_id]);
-                user.agents = agentIds.rows.map(r => r.agent_id);
+                const agentData = await pool.query(
+                    `SELECT agent_id, can_mark FROM "${getTableName('User_Agents')}" WHERE user_id = $1`,
+                    [user.user_id]
+                );
+                user.agents = agentData.rows.map(r => r.agent_id);
                 user.agentCount = user.agents.length;
+                user.agentPermissions = Object.fromEntries(
+                    agentData.rows.map(r => [r.agent_id, r.can_mark || false])
+                );
             } else if (user.role === 'admin' && user.user_id === requesterId) {
                 // For admin viewing themselves, show their assigned agents
-                const agentIds = await pool.query(`SELECT agent_id FROM "${getTableName('User_Agents')}" WHERE user_id = $1`, [user.user_id]);
-                user.agents = agentIds.rows.map(r => r.agent_id);
+                const agentData = await pool.query(
+                    `SELECT agent_id, can_mark FROM "${getTableName('User_Agents')}" WHERE user_id = $1`,
+                    [user.user_id]
+                );
+                user.agents = agentData.rows.map(r => r.agent_id);
                 user.agentCount = user.agents.length;
+                user.agentPermissions = Object.fromEntries(
+                    agentData.rows.map(r => [r.agent_id, r.can_mark || false])
+                );
             } else {
                 // Regular users or users managed by an admin
-                const agentIds = await pool.query(`SELECT agent_id FROM "${getTableName('User_Agents')}" WHERE user_id = $1`, [user.user_id]);
-                user.agents = agentIds.rows.map(r => r.agent_id);
+                const agentData = await pool.query(
+                    `SELECT agent_id, can_mark FROM "${getTableName('User_Agents')}" WHERE user_id = $1`,
+                    [user.user_id]
+                );
+                user.agents = agentData.rows.map(r => r.agent_id);
                 user.agentCount = user.agents.length;
+                user.agentPermissions = Object.fromEntries(
+                    agentData.rows.map(r => [r.agent_id, r.can_mark || false])
+                );
             }
         }
 
@@ -1690,6 +1716,212 @@ app.get('/api/users/creators', async (req, res) => {
         res.json({ creators: result.rows });
     } catch (err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+// Update Review Status
+app.patch('/api/user/conversations/:sessionId/review-status', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'No token' });
+
+    let userId = null;
+    try {
+        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+        userId = decoded.userId;
+    } catch (err) {
+        return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+
+    try {
+        const { sessionId } = req.params;
+        const { status } = req.body;
+
+        // Validate status
+        const validStatuses = ['pending', 'needs_review', 'completed'];
+        if (!validStatuses.includes(status)) {
+            return res.status(400).json({
+                success: false,
+                error: `Invalid status. Must be one of: ${validStatuses.join(', ')}`
+            });
+        }
+
+        // Get user to check permissions
+        const userResult = await pool.query(
+            `SELECT role FROM "${getTableName('Users')}" WHERE user_id = $1`,
+            [userId]
+        );
+
+        if (userResult.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'User not found' });
+        }
+
+        const userRole = userResult.rows[0].role;
+
+        // Get agent_id for this session
+        const sessionResult = await pool.query(
+            `SELECT agent_id FROM "${getTableName('Sessions')}" WHERE session_id = $1`,
+            [sessionId]
+        );
+
+        if (sessionResult.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'Session not found' });
+        }
+
+        const agentId = sessionResult.rows[0].agent_id;
+
+        // Permission check: Super Admin can always mark
+        if (userRole !== 'super_admin') {
+            // Admin can mark if they have access to the agent
+            if (userRole === 'admin') {
+                const adminAccessCheck = await pool.query(
+                    `SELECT * FROM "${getTableName('User_Agents')}" WHERE user_id = $1 AND agent_id = $2`,
+                    [userId, agentId]
+                );
+                if (adminAccessCheck.rows.length === 0) {
+                    return res.status(403).json({
+                        success: false,
+                        error: 'You do not have access to this agent'
+                    });
+                }
+            } else {
+                // Regular user must have can_mark permission
+                const permissionCheck = await pool.query(
+                    `SELECT can_mark FROM "${getTableName('User_Agents')}" 
+                     WHERE user_id = $1 AND agent_id = $2`,
+                    [userId, agentId]
+                );
+
+                if (permissionCheck.rows.length === 0) {
+                    return res.status(403).json({
+                        success: false,
+                        error: 'You do not have access to this agent'
+                    });
+                }
+
+                if (!permissionCheck.rows[0].can_mark) {
+                    return res.status(403).json({
+                        success: false,
+                        error: 'You do not have permission to mark sessions for this agent'
+                    });
+                }
+            }
+        }
+
+        // Update the review status in Conversations table
+        const updateResult = await pool.query(`
+            UPDATE "${getTableName('Conversations')}"
+            SET 
+                review_status = $1,
+                reviewed_by = $2,
+                reviewed_at = NOW()
+            WHERE session_id = $3
+            RETURNING *
+        `, [status, userId, sessionId]);
+
+        if (updateResult.rows.length === 0) {
+            // If no conversation exists yet, create one
+            await pool.query(`
+                INSERT INTO "${getTableName('Conversations')}" 
+                (session_id, agent_id, turns, review_status, reviewed_by, reviewed_at)
+                SELECT session_id, agent_id, 0, $1, $2, NOW()
+                FROM "${getTableName('Sessions')}"
+                WHERE session_id = $3
+                ON CONFLICT (session_id) DO UPDATE
+                SET review_status = $1, reviewed_by = $2, reviewed_at = NOW()
+            `, [status, userId, sessionId]);
+        }
+
+        console.log(`✅ Review status updated: ${sessionId} -> ${status} by ${userId}`);
+
+        res.json({
+            success: true,
+            message: 'Review status updated successfully',
+            status: status
+        });
+
+    } catch (err) {
+        console.error('Update review status error:', err.message);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to update review status'
+        });
+    }
+});
+
+// Toggle Mark Permission for User on Agent
+app.post('/api/admin/users/:userId/agents/:agentId/mark-permission', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'No token' });
+
+    let requesterId = null;
+    try {
+        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+        requesterId = decoded.userId;
+    } catch (err) {
+        return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+
+    try {
+        const { userId, agentId } = req.params;
+        const { canMark } = req.body;
+
+        // Check if requester is admin
+        const requesterResult = await pool.query(
+            `SELECT role FROM "${getTableName('Users')}" WHERE user_id = $1`,
+            [requesterId]
+        );
+
+        if (requesterResult.rows.length === 0 ||
+            (requesterResult.rows[0].role !== 'super_admin' && requesterResult.rows[0].role !== 'admin')) {
+            return res.status(403).json({ success: false, error: 'Insufficient permissions' });
+        }
+
+        // Check if assignment exists in User_Agents table
+        const assignmentCheck = await pool.query(
+            `SELECT * FROM "${getTableName('User_Agents')}" WHERE user_id = $1 AND agent_id = $2`,
+            [userId, agentId]
+        );
+
+        if (assignmentCheck.rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                error: 'User is not assigned to this agent'
+            });
+        }
+
+        // For now, we'll store can_mark in a JSON metadata field or separate column
+        // Since the User_Agents table might not have a can_mark column yet, 
+        // let's check if the column exists and add it if needed
+        try {
+            await pool.query(`
+                ALTER TABLE "${getTableName('User_Agents')}" 
+                ADD COLUMN IF NOT EXISTS can_mark BOOLEAN DEFAULT FALSE
+            `);
+        } catch (alterErr) {
+            console.log('can_mark column might already exist:', alterErr.message);
+        }
+
+        // Update the permission
+        await pool.query(`
+            UPDATE "${getTableName('User_Agents')}"
+            SET can_mark = $1
+            WHERE user_id = $2 AND agent_id = $3
+        `, [canMark, userId, agentId]);
+
+        console.log(`✅ Mark permission updated: User ${userId} on Agent ${agentId} -> can_mark: ${canMark}`);
+
+        res.json({
+            success: true,
+            message: 'Permission updated successfully',
+            canMark: canMark
+        });
+
+    } catch (err) {
+        console.error('Toggle mark permission error:', err.message);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to update permission'
+        });
     }
 });
 

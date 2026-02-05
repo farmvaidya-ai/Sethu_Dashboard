@@ -1,6 +1,6 @@
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { LogOut, User, Users, LayoutDashboard, Lock } from 'lucide-react';
+import { LogOut, User, Users, LayoutDashboard, Lock, Shield } from 'lucide-react';
 
 export default function Header() {
   const { user, logout, isAdmin } = useAuth();
@@ -38,6 +38,13 @@ export default function Header() {
               >
                 <Users size={18} />
                 Users
+              </button>
+              <button
+                onClick={() => navigate('/admin/permissions')}
+                className={`nav-button ${location.pathname === '/admin/permissions' ? 'active' : ''}`}
+              >
+                <Shield size={18} />
+                Permissions
               </button>
             </>
           )}
