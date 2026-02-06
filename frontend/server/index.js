@@ -2003,9 +2003,8 @@ app.post('/api/admin/users/:userId/agents/:agentId/mark-permission', async (req,
 const distPath = path.join(__dirname, '../dist');
 if (fs.existsSync(distPath)) {
     app.use(express.static(distPath));
-    // Handle SPA routing
-    app.get('(.*)', (req, res, next) => {
-        if (req.path.startsWith('/api')) return next();
+    // Handle SPA routing - use regex for Express 5 compatibility
+    app.get(/^(?!\/api).*$/, (req, res) => {
         res.sendFile(path.join(distPath, 'index.html'));
     });
 } else {
