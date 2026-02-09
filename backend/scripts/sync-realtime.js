@@ -557,7 +557,7 @@ async function runSyncCycle() {
             return; // Exit early, let the other instance handle it
         }
 
-        logger.info('🔒 Lock acquired - starting sync...');
+        logger.info('🔒 Lock acquired (v2.1 Protected) - starting sync...');
 
         const client = new PipecatClient();
         const agents = await syncAgents(client);
