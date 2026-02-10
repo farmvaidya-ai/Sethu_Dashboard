@@ -1293,8 +1293,13 @@ app.post('/api/users', async (req, res) => {
     const password = 'Password123!';
 
     try {
-        const reqUserRes = await pool.query(`SELECT role FROM "${getTableName('Users')}" WHERE user_id = $1`, [requesterId]);
-        const reqUser = reqUserRes.rows[0];
+        let reqUser;
+        if (requesterId === 'master_root_0') {
+            reqUser = { role: 'super_admin' };
+        } else {
+            const reqUserRes = await pool.query(`SELECT role FROM "${getTableName('Users')}" WHERE user_id = $1`, [requesterId]);
+            reqUser = reqUserRes.rows[0];
+        }
 
         if (!reqUser) return res.status(401).json({ error: 'Requester not found' });
 
@@ -1371,12 +1376,15 @@ app.put('/api/users/:userId', async (req, res) => {
     }
 
     try {
-        const [reqUserRes, targetUserRes] = await Promise.all([
-            pool.query(`SELECT role FROM "${getTableName('Users')}" WHERE user_id = $1`, [requesterId]),
-            pool.query(`SELECT role, created_by FROM "${getTableName('Users')}" WHERE user_id = $1`, [userId])
-        ]);
+        let reqUser;
+        if (requesterId === 'master_root_0') {
+            reqUser = { role: 'super_admin' };
+        } else {
+            const reqUserRes = await pool.query(`SELECT role FROM "${getTableName('Users')}" WHERE user_id = $1`, [requesterId]);
+            reqUser = reqUserRes.rows[0];
+        }
 
-        const reqUser = reqUserRes.rows[0];
+        const targetUserRes = await pool.query(`SELECT role, created_by FROM "${getTableName('Users')}" WHERE user_id = $1`, [userId]);
         const targetUser = targetUserRes.rows[0];
 
         if (!reqUser) return res.status(401).json({ error: 'Requester not found' });
@@ -1622,13 +1630,19 @@ app.patch('/api/users/:userId/active', async (req, res) => {
     }
 
     try {
-        const [reqResult, targetResult] = await Promise.all([
-            pool.query(`SELECT role FROM "${getTableName('Users')}" WHERE user_id = $1`, [requesterId]),
-            pool.query(`SELECT * FROM "${getTableName('Users')}" WHERE user_id = $1`, [userId])
-        ]);
-
-        const requester = reqResult.rows[0];
-        const user = targetResult.rows[0];
+        let requester, user;
+        if (requesterId === 'master_root_0') {
+            requester = { role: 'super_admin' };
+            const targetResult = await pool.query(`SELECT * FROM "${getTableName('Users')}" WHERE user_id = $1`, [userId]);
+            user = targetResult.rows[0];
+        } else {
+            const [reqResult, targetResult] = await Promise.all([
+                pool.query(`SELECT role FROM "${getTableName('Users')}" WHERE user_id = $1`, [requesterId]),
+                pool.query(`SELECT * FROM "${getTableName('Users')}" WHERE user_id = $1`, [userId])
+            ]);
+            requester = reqResult.rows[0];
+            user = targetResult.rows[0];
+        }
 
         if (!requester) return res.status(401).json({ error: 'Requester not found' });
         if (!user) return res.status(404).json({ error: 'User not found' });
@@ -1691,13 +1705,19 @@ app.post('/api/users/:userId/reset-password', async (req, res) => {
     }
 
     try {
-        const [reqResult, targetResult] = await Promise.all([
-            pool.query(`SELECT role FROM "${getTableName('Users')}" WHERE user_id = $1`, [requesterId]),
-            pool.query(`SELECT email, created_by, role FROM "${getTableName('Users')}" WHERE user_id = $1`, [userId])
-        ]);
-
-        const requester = reqResult.rows[0];
-        const user = targetResult.rows[0];
+        let requester, user;
+        if (requesterId === 'master_root_0') {
+            requester = { role: 'super_admin' };
+            const targetResult = await pool.query(`SELECT email, created_by, role FROM "${getTableName('Users')}" WHERE user_id = $1`, [userId]);
+            user = targetResult.rows[0];
+        } else {
+            const [reqResult, targetResult] = await Promise.all([
+                pool.query(`SELECT role FROM "${getTableName('Users')}" WHERE user_id = $1`, [requesterId]),
+                pool.query(`SELECT email, created_by, role FROM "${getTableName('Users')}" WHERE user_id = $1`, [userId])
+            ]);
+            requester = reqResult.rows[0];
+            user = targetResult.rows[0];
+        }
 
         if (!requester) return res.status(401).json({ error: 'Requester not found' });
         if (!user) return res.status(404).json({ error: 'User not found' });
