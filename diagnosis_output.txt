@@ -1,0 +1,30 @@
+=== USAGE LOGS ===
+  call_sid: b0243d37e7a26990c9be65ea8ca31a2j
+  from: null
+  to: null
+  direction: null
+  call_status: null
+---
+  call_sid: 9dc05c57a583298b9e3b91afe3ac1a2i
+  from: null
+  to: null
+  direction: null
+  call_status: null
+---
+  call_sid: 9dc05c57a583298b9e3b91afe3ac1a2i
+  from: null
+  to: null
+  direction: null
+  call_status: null
+---
+
+=== SESSION FOR FIRST LOG ===
+  session_id: 461a4ff4-c97b-4185-8608-7fcd79c8eab1
+  agent_id: cc4bd4fb-b162-4175-8420-8912d263b53a
+  telephony keys: ["call_id","account_sid"]
+  tel.call_id = b0243d37e7a26990c9be65ea8ca31a2j
+  tel.account_sid = farmvaidya1
+
+=== AGENT TELEPHONY CONFIG ===
+  {"agent_id":"cc4bd4fb-b162-4175-8420-8912d263b53a","exophone":"04045210661","app_id":"1175263","updated_at":"2026-02-10T04:43:19.446Z"}
+  {"agent_id":"2b71fec4-3bec-44b2-9bef-0575923290ee","exophone":"04045210509","app_id":"1179355","updated_at":"2026-02-11T02:45:49.352Z"}

@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import * as XLSX from 'xlsx';
 import pg from 'pg';
+import jwt from 'jsonwebtoken';
 import exotelService from '../services/exotel.service.js';
 
 const { Pool } = pg;
@@ -37,6 +38,52 @@ export const initiateCampaign = async (req, res) => {
 
     if (!filePath || !campaignName) {
         return res.status(400).json({ error: 'CSV file and Campaign Name are required' });
+    }
+
+    // --- 0. Credit Check ---
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+        if (filePath && fs.existsSync(filePath)) fs.unlink(filePath, () => { });
+        return res.status(401).json({ error: 'No token provided' });
+    }
+
+    try {
+        const token = authHeader.split(' ')[1];
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const userId = decoded.userId;
+
+        const tableName = process.env.APP_ENV === 'test' ? 'test_users' : 'Users';
+        const userRes = await pool.query(`SELECT minutes_balance, role, created_by, subscription_expiry, is_active FROM "${tableName}" WHERE user_id = $1`, [userId]);
+        const user = userRes.rows[0];
+
+        if (!user) throw new Error('User not found');
+
+        let billableUser = user;
+        if (user.role === 'user' && user.created_by) {
+            const parentRes = await pool.query(`SELECT minutes_balance, subscription_expiry, is_active FROM "${tableName}" WHERE user_id = $1`, [user.created_by]);
+            if (parentRes.rows[0]) {
+                billableUser = parentRes.rows[0];
+            }
+        }
+
+        const isExempt = user.role === 'super_admin' || userId === 'master_root_0';
+
+        if (!isExempt) {
+            if (!billableUser.is_active) throw new Error('Account deactivated');
+            if (billableUser.subscription_expiry && new Date(billableUser.subscription_expiry) < new Date()) {
+                throw new Error('Subscription expired');
+            }
+
+            if ((billableUser.minutes_balance || 0) <= 0) {
+                console.warn(`⛔ Campaign blocked for user ${userId} due to insufficient organization credits (Balance: ${billableUser.minutes_balance})`);
+                if (filePath && fs.existsSync(filePath)) fs.unlink(filePath, () => { });
+                return res.status(403).json({ error: 'Insufficient organization credits! Please contact admin.' });
+            }
+        }
+    } catch (authErr) {
+        console.error('Auth/Credit Check Failed:', authErr.message);
+        if (filePath && fs.existsSync(filePath)) fs.unlink(filePath, () => { });
+        return res.status(401).json({ error: 'Authentication failed or insufficient credits' });
     }
 
     try {

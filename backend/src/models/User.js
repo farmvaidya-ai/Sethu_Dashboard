@@ -61,6 +61,26 @@ const User = sequelize.define('User', {
             model: APP_ENV === 'test' ? 'test_users' : 'Users',
             key: 'user_id'
         }
+    },
+    phone_number: {
+        type: DataTypes.STRING(20),
+        allowNull: true
+    },
+    subscription_expiry: {
+        type: DataTypes.DATE,
+        allowNull: true
+    },
+    minutes_balance: {
+        type: DataTypes.INTEGER,
+        defaultValue: 0
+    },
+    active_lines: {
+        type: DataTypes.INTEGER,
+        defaultValue: 0
+    },
+    last_low_credit_alert: {
+        type: DataTypes.DATE,
+        defaultValue: null
     }
 }, {
     tableName: APP_ENV === 'test' ? 'test_users' : 'Users',
@@ -76,6 +96,9 @@ const User = sequelize.define('User', {
         },
         {
             fields: ['is_active']
+        },
+        {
+            fields: ['phone_number']
         }
     ]
 });

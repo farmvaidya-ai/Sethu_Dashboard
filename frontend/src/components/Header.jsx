@@ -65,18 +65,22 @@ export default function Header() {
             </h1>
           </div>
 
-          <div className="brand-right" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            {user?.email && (
-              <span style={{ fontSize: '0.9rem', color: '#64748b', marginRight: '8px', fontWeight: '500' }}>
-                {user.email}
-              </span>
-            )}
-            <button onClick={() => navigate('/change-password')} className="action-icon-btn" title="Change Password">
-              <Lock size={18} />
-            </button>
-            <button onClick={handleLogout} className="logout-btn-minimal" title="Logout">
-              <LogOut size={18} />
-            </button>
+          <div className="brand-right" style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              {user?.email && (
+                <span style={{ fontSize: '0.9rem', color: '#64748b', marginRight: '4px', fontWeight: '500' }}>
+                  {user.email}
+                </span>
+              )}
+              <button onClick={() => navigate('/change-password')} className="action-icon-btn" title="Change Password">
+                <Lock size={18} />
+              </button>
+              <button onClick={handleLogout} className="logout-btn-minimal" title="Logout">
+                <LogOut size={18} />
+              </button>
+            </div>
           </div>
         </div>
 
@@ -130,12 +134,52 @@ export default function Header() {
                       Permissions
                     </button>
 
+                    <button
+                      onClick={() => navigate('/admin/billing')}
+                      className={`nav-link-btn ${location.pathname === '/admin/billing' ? 'active' : ''}`}
+                    >
+                      Billing
+                    </button>
                   </>
                 )}
               </nav>
             </div>
 
             <div className="nav-tier-right">
+              {/* Credits Display (Sticky) */}
+              {/* Credits Display (Sticky) */}
+              {(user?.minutes_balance !== undefined) && (
+                <div
+                  onClick={() => navigate('/admin/usage-history')}
+                  title="View Minutes Ledger"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    background: 'rgba(241, 245, 249, 0.8)',
+                    padding: '4px 10px',
+                    borderRadius: '16px',
+                    border: '1px solid #e2e8f0',
+                    fontSize: '0.8rem',
+                    fontWeight: '600',
+                    color: '#475569',
+                    marginRight: '8px',
+                    cursor: 'pointer',
+                    userSelect: 'none',
+                    transition: 'all 0.2s',
+                  }}
+                  onMouseEnter={(e) => e.currentTarget.style.background = '#e2e8f0'}
+                  onMouseLeave={(e) => e.currentTarget.style.background = 'rgba(241, 245, 249, 0.8)'}
+                >
+                  <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: (user.minutes_balance > 100) ? '#10b981' : '#ef4444' }}></div>
+                  {(() => {
+                    const mins = Math.floor(user.minutes_balance);
+                    const secs = Math.round((user.minutes_balance - mins) * 60);
+                    return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
+                  })()}
+                </div>
+              )}
+
               <div
                 className="user-role-badge"
                 title={user?.email}
@@ -395,6 +439,6 @@ export default function Header() {
            letter-spacing: -0.5px;
         }
       `}</style>
-    </header>
+    </header >
   );
 }
