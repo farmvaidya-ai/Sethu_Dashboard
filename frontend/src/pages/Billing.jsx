@@ -401,7 +401,7 @@ const Billing = () => {
                                                                             <span style={{ color: '#64748b', fontStyle: 'italic' }}>{details.direction === 'inbound' ? '📞 Incoming Call' : '📞 Outgoing Call'}</span>
                                                                         )}
                                                                     </div>
-                                                                    <div style={{ display: 'flex', gap: '8px', marginTop: '4px', flexWrap: 'wrap' }}>
+                                                                    <div style={{ display: 'flex', gap: '8px', marginTop: '4px', flexWrap: 'wrap', alignItems: 'center' }}>
                                                                         {details.session_id && (
                                                                             <Link
                                                                                 to={`/admin/session/${details.session_id}`}
@@ -409,16 +409,6 @@ const Billing = () => {
                                                                             >
                                                                                 <LinkIcon size={12} /> View Session
                                                                             </Link>
-                                                                        )}
-                                                                        {details.recording_url && (
-                                                                            <a
-                                                                                href={details.recording_url}
-                                                                                target="_blank"
-                                                                                rel="noopener noreferrer"
-                                                                                style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--primary)', textDecoration: 'none' }}
-                                                                            >
-                                                                                <PlayCircle size={12} /> Listen
-                                                                            </a>
                                                                         )}
                                                                     </div>
                                                                 </div>

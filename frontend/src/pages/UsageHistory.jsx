@@ -158,7 +158,7 @@ const UsageHistory = () => {
                                                                     <span style={{ color: '#64748b', fontStyle: 'italic' }}>📞 {details.direction === 'inbound' ? 'Incoming Call' : 'Outgoing Call'}</span>
                                                                 )}
                                                             </div>
-                                                            <div style={{ display: 'flex', gap: '12px', marginTop: '6px' }}>
+                                                            <div style={{ display: 'flex', gap: '12px', marginTop: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
                                                                 {details.session_id && (
                                                                     <Link
                                                                         to={`/admin/session/${details.session_id}`}
@@ -166,16 +166,6 @@ const UsageHistory = () => {
                                                                     >
                                                                         <LinkIcon size={12} /> View Session
                                                                     </Link>
-                                                                )}
-                                                                {details.recording_url && (
-                                                                    <a
-                                                                        href={details.recording_url}
-                                                                        target="_blank"
-                                                                        rel="noopener noreferrer"
-                                                                        style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--primary)', textDecoration: 'none', fontSize: '0.8rem' }}
-                                                                    >
-                                                                        <PlayCircle size={12} /> Recording
-                                                                    </a>
                                                                 )}
                                                             </div>
                                                         </div>

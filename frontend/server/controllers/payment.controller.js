@@ -215,25 +215,23 @@ export const getTransactionHistory = async (req, res) => {
         let params = [userId];
 
         // Helper for robust details JSON
-        // from/to: try log values, then ATC/session metadata, fallback null
-        // status: if null, infer 'Completed' since minutes were consumed
-        // direction: include for frontend display
+        // IMPORTANT: Exotel campaign calls store from_number=customer, to_number=exophone
+        // For OUTBOUND calls: logical From (caller) = exophone = ul.to_number, logical To (recipient) = customer = ul.from_number
+        // For INBOUND calls: logical From (caller) = customer = ul.from_number, logical To (recipient) = exophone = ul.to_number
         const detailsJson = `
             json_build_object(
-                'from', COALESCE(
-                            NULLIF(ul.from_number, 'Unknown'), 
-                            CASE 
-                                WHEN ul.direction = 'outbound' OR ul.direction IS NULL THEN atc.exophone 
-                                ELSE NULLIF(s.metadata->'telephony'->>'customer_number', '') 
-                            END
-                        ),
-                'to', COALESCE(
-                            NULLIF(ul.to_number, 'Unknown'), 
-                            CASE 
-                                WHEN ul.direction = 'outbound' OR ul.direction IS NULL THEN NULLIF(s.metadata->'telephony'->>'customer_number', '')
-                                ELSE atc.exophone 
-                            END
-                        ),
+                'from', CASE
+                    WHEN ul.direction = 'outbound' OR ul.direction IS NULL THEN
+                        COALESCE(NULLIF(ul.to_number, 'Unknown'), atc.exophone)
+                    ELSE
+                        COALESCE(NULLIF(ul.from_number, 'Unknown'), NULLIF(s.metadata->'telephony'->>'customer_number', ''))
+                END,
+                'to', CASE
+                    WHEN ul.direction = 'outbound' OR ul.direction IS NULL THEN
+                        COALESCE(NULLIF(ul.from_number, 'Unknown'), NULLIF(s.metadata->'telephony'->>'customer_number', ''))
+                    ELSE
+                        COALESCE(NULLIF(ul.to_number, 'Unknown'), atc.exophone)
+                END,
                 'status', COALESCE(NULLIF(ul.call_status, 'Unknown'), CASE WHEN ul.minutes_used > 0 THEN 'Completed' ELSE 'Attempted' END),
                 'direction', COALESCE(ul.direction, 'outbound'),
                 'sid', ul.call_sid,
@@ -271,8 +269,22 @@ export const getTransactionHistory = async (req, res) => {
                     END as description,
                     ${detailsJson} as details
                 FROM "${usageTable}" ul
-                LEFT JOIN "${sessionsTable}" s ON s.metadata->'telephony'->>'call_id' = ul.call_sid
-                LEFT JOIN "${atcTable}" atc ON atc.agent_id = s.agent_id
+                LEFT JOIN "${atcTable}" atc ON (
+                    atc.exophone = ul.to_number OR atc.exophone = ul.from_number
+                )
+                LEFT JOIN LATERAL (
+                    SELECT s.session_id, s.agent_id, s.metadata
+                    FROM "${sessionsTable}" s
+                    WHERE (
+                        s.metadata->'telephony'->>'call_id' = ul.call_sid
+                        OR (
+                            s.agent_id = atc.agent_id
+                            AND s.started_at BETWEEN (ul.created_at - INTERVAL '10 minutes') AND (ul.created_at + INTERVAL '10 minutes')
+                        )
+                    )
+                    ORDER BY ABS(EXTRACT(EPOCH FROM (s.started_at - ul.created_at)))
+                    LIMIT 1
+                ) s ON true
                 WHERE ul.user_id = $1
                 ORDER BY created_at DESC 
                 LIMIT $2 OFFSET $3
@@ -305,8 +317,22 @@ export const getTransactionHistory = async (req, res) => {
                         END as description,
                         ${detailsJson} as details
                     FROM "${usageTable}" ul
-                    LEFT JOIN "${sessionsTable}" s ON s.metadata->'telephony'->>'call_id' = ul.call_sid
-                    LEFT JOIN "${atcTable}" atc ON atc.agent_id = s.agent_id
+                    LEFT JOIN "${atcTable}" atc ON (
+                        atc.exophone = ul.to_number OR atc.exophone = ul.from_number
+                    )
+                    LEFT JOIN LATERAL (
+                        SELECT s.session_id, s.agent_id, s.metadata
+                        FROM "${sessionsTable}" s
+                        WHERE (
+                            s.metadata->'telephony'->>'call_id' = ul.call_sid
+                            OR (
+                                s.agent_id = atc.agent_id
+                                AND s.started_at BETWEEN (ul.created_at - INTERVAL '10 minutes') AND (ul.created_at + INTERVAL '10 minutes')
+                            )
+                        )
+                        ORDER BY ABS(EXTRACT(EPOCH FROM (s.started_at - ul.created_at)))
+                        LIMIT 1
+                    ) s ON true
                     WHERE ul.user_id = $1
                 ) as combined_history
                 ORDER BY created_at DESC 
