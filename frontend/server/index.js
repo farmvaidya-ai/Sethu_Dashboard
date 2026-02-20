@@ -1059,6 +1059,99 @@ app.get('/api/stats', async (req, res) => {
     }
 });
 
+// Get Active Sessions (live count per agent)
+app.get('/api/active-sessions', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'No token' });
+
+    const token = authHeader.split(' ')[1];
+    let requesterId = null;
+    let isMaster = false;
+
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        requesterId = decoded.userId;
+        isMaster = decoded.isMaster && requesterId === 'master_root_0';
+    } catch (err) {
+        return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+
+    try {
+        let userRole = 'user';
+        if (isMaster) {
+            userRole = 'super_admin';
+        } else {
+            const userRes = await pool.query(`SELECT role FROM "${getTableName('Users')}" WHERE user_id = $1`, [requesterId]);
+            if (userRes.rows[0]) userRole = userRes.rows[0].role;
+        }
+
+        let query;
+        let params = [];
+
+        if (userRole === 'super_admin') {
+            // For super_admin: get all agents with active sessions (ended_at IS NULL)
+            query = `
+                SELECT 
+                    a.agent_id,
+                    a.name as agent_name,
+                    COUNT(s.session_id) as active_session_count,
+                    MIN(s.started_at) as oldest_session_start,
+                    MAX(s.started_at) as newest_session_start
+                FROM "${getTableName('Agents')}" a
+                INNER JOIN "${getTableName('Sessions')}" s ON s.agent_id = a.agent_id
+                WHERE s.ended_at IS NULL
+                  AND s.started_at >= NOW() - INTERVAL '24 hours'
+                  AND (s.is_hidden IS NULL OR s.is_hidden = FALSE)
+                  AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
+                GROUP BY a.agent_id, a.name
+                ORDER BY active_session_count DESC, newest_session_start DESC
+            `;
+        } else {
+            // For regular users: only show their assigned agents
+            query = `
+                SELECT 
+                    a.agent_id,
+                    a.name as agent_name,
+                    COUNT(s.session_id) as active_session_count,
+                    MIN(s.started_at) as oldest_session_start,
+                    MAX(s.started_at) as newest_session_start
+                FROM "${getTableName('Agents')}" a
+                INNER JOIN "${getTableName('User_Agents')}" ua ON a.agent_id = ua.agent_id
+                INNER JOIN "${getTableName('Sessions')}" s ON s.agent_id = a.agent_id
+                WHERE ua.user_id = $1
+                  AND s.ended_at IS NULL
+                  AND s.started_at >= NOW() - INTERVAL '24 hours'
+                  AND (s.is_hidden IS NULL OR s.is_hidden = FALSE)
+                  AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
+                GROUP BY a.agent_id, a.name
+                ORDER BY active_session_count DESC, newest_session_start DESC
+            `;
+            params = [requesterId];
+        }
+
+        const result = await pool.query(query, params);
+
+        const agentsWithActiveSessions = result.rows.map(row => ({
+            agent_id: row.agent_id,
+            agent_name: row.agent_name,
+            active_session_count: parseInt(row.active_session_count || 0),
+            oldest_session_start: row.oldest_session_start,
+            newest_session_start: row.newest_session_start
+        }));
+
+        const totalActiveSessions = agentsWithActiveSessions.reduce((sum, a) => sum + a.active_session_count, 0);
+
+        res.json({
+            agents: agentsWithActiveSessions,
+            totalActiveSessions,
+            agentsWithActiveSessions: agentsWithActiveSessions.length
+        });
+    } catch (error) {
+        console.error('Error fetching active sessions:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Get Sessions for Agent
 app.get('/api/sessions', async (req, res) => {
     const { agent_id, page = 1, limit = 10, sortBy = 'session_id', sortOrder = 'desc', search = '' } = req.query;
