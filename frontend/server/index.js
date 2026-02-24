@@ -854,10 +854,74 @@ const STATS_CACHE_DURATION = 30000;
 app.get('/api/stats', async (req, res) => {
     try {
         const now = Date.now();
-        if (statsCache && (now - statsCacheTime) < STATS_CACHE_DURATION) {
+
+        // Extract user identity from JWT token
+        let isMasterAdmin = true;
+        let scopedUserId = null;
+        const authHeader = req.headers.authorization;
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+            try {
+                const decoded = jwt.verify(authHeader.substring(7), JWT_SECRET);
+                if (!decoded.isMaster && decoded.role !== 'super_admin') {
+                    isMasterAdmin = false;
+                    scopedUserId = decoded.userId;
+                }
+            } catch (e) {
+                // Invalid/expired token — fall through to global stats
+            }
+        }
+
+        // Use cache only for global (master admin) stats
+        if (isMasterAdmin && statsCache && (now - statsCacheTime) < STATS_CACHE_DURATION) {
             return res.json(statsCache);
         }
 
+        // For regular admins, scope stats to their assigned agents
+        if (!isMasterAdmin && scopedUserId) {
+            const assignmentResult = await pool.query(
+                `SELECT agent_id FROM "${getTableName('User_Agents')}" WHERE user_id = $1`,
+                [scopedUserId]
+            );
+            const agentIds = assignmentResult.rows.map(r => r.agent_id);
+
+            if (agentIds.length === 0) {
+                return res.json({ totalAgents: 0, totalSessions: 0, totalDuration: 0, successRate: 0, hiddenStats: { agents: 0 } });
+            }
+
+            const [agentsRes, sessionsRes, completedRes, durationRes] = await Promise.all([
+                pool.query(
+                    `SELECT COUNT(*) FROM "${getTableName('Agents')}" WHERE agent_id = ANY($1::text[]) AND (is_hidden IS NULL OR is_hidden = FALSE)`,
+                    [agentIds]
+                ),
+                pool.query(
+                    `SELECT COUNT(s.*) as count FROM "${getTableName('Sessions')}" s WHERE s.agent_id = ANY($1::text[]) AND (s.is_hidden IS NULL OR s.is_hidden = FALSE)`,
+                    [agentIds]
+                ),
+                pool.query(
+                    `SELECT COUNT(s.*) as count FROM "${getTableName('Sessions')}" s WHERE s.agent_id = ANY($1::text[]) AND s.status = 'HTTP_COMPLETED' AND (s.is_hidden IS NULL OR s.is_hidden = FALSE)`,
+                    [agentIds]
+                ),
+                pool.query(
+                    `SELECT SUM(s.duration_seconds) as total_duration FROM "${getTableName('Sessions')}" s WHERE s.agent_id = ANY($1::text[]) AND (s.is_hidden IS NULL OR s.is_hidden = FALSE)`,
+                    [agentIds]
+                )
+            ]);
+
+            const totalAgents = parseInt(agentsRes.rows[0].count);
+            const totalSessions = parseInt(sessionsRes.rows[0].count);
+            const completedSessions = parseInt(completedRes.rows[0].count);
+            const totalDuration = parseInt(durationRes.rows[0].total_duration || 0);
+
+            return res.json({
+                totalAgents,
+                totalSessions,
+                totalDuration,
+                successRate: totalSessions > 0 ? ((completedSessions / totalSessions) * 100).toFixed(1) : 0,
+                hiddenStats: { agents: 0 }
+            });
+        }
+
+        // Global stats (master admin)
         const [agentsRes, sessionsRes, completedRes, durationRes, hiddenAgentsRes] = await Promise.all([
             pool.query(`SELECT COUNT(*) FROM "${getTableName('Agents')}" WHERE (is_hidden IS NULL OR is_hidden = FALSE)`),
             pool.query(`
