@@ -242,8 +242,11 @@ function detectLogFormat(logs) {
 /**
  * Parse event-based logs (biolmin style)
  * Assembles conversation turns from individual speech and TTS events
+ * @param {Array} logs - Log entries
+ * @param {string} [targetSessionId] - If provided, assign all logs to this session
+ *   (used when logs are already pre-filtered by session at the API level)
  */
-function parseEventBasedLogs(logs) {
+function parseEventBasedLogs(logs, targetSessionId = null) {
     const turns = [];
     const sessionEvents = new Map(); // Group events by session
 
@@ -264,7 +267,9 @@ function parseEventBasedLogs(logs) {
     // Group all events by session
     for (const log of logs) {
         const logMsg = getLogMessage(log);
-        const sessionId = extractSessionId(logMsg);
+        // If targetSessionId is provided, attribute ALL logs to that session
+        // (they were already filtered by session at the API level via query param)
+        const sessionId = targetSessionId || extractSessionId(logMsg);
         if (!sessionId) continue;
 
         if (!sessionEvents.has(sessionId)) {
@@ -447,35 +452,96 @@ function extractTelephonyMetadata(logMessage) {
 }
 
 /**
- * Main normalization function - dynamically handles different log formats
+ * Main normalization function - dynamically handles different log formats.
+ * Tries BOTH context-based and event-based parsing, then merges for best quality.
+ * 
+ * Context-based: Extracts user/assistant pairs from LLM context snapshots.
+ *   - PRO: Has full conversation history including older assistant responses.
+ *   - CON: The LAST turn's assistant response is ALWAYS missing (context is
+ *     what was sent TO the LLM, not the LLM's response).
+ * 
+ * Event-based: Assembles turns from speech events + TTS generation events.
+ *   - PRO: Captures ALL assistant responses via TTS (including the latest one).
+ *   - CON: May miss turns if speech events were not logged or paginated out.
+ * 
+ * Strategy: Try both, pick the one with more COMPLETE turns (both user + assistant),
+ * then fill any remaining holes from the other method.
+ * 
+ * @param {Array} logs - Log entries
+ * @param {string} [targetSessionId] - If provided, attribute all logs to this session
+ *   (used when logs are pre-filtered by session at API level)
  */
-function normalizeLogs(logs) {
-    const format = detectLogFormat(logs);
-
-    if (format === 'turn-based') {
-        // Process turn-based logs (webagent style)
-        for (const log of logs) {
-            const msg = typeof log === 'string' ? log : (log.log || log.message || '');
-            if (msg.includes('context [')) {
-                return parseContextLog(msg);
-            }
-        }
-    } else if (format === 'event-based') {
-        // Process event-based logs (biolmin style)
-        return parseEventBasedLogs(logs);
-    }
-
-    // Fallback: try both methods
-    // Fallback: try both methods
+function normalizeLogs(logs, targetSessionId = null) {
+    // ===== 1. Try context-based parsing (from LLM context snapshots) =====
+    let contextTurns = [];
     for (const log of logs) {
         const msg = typeof log === 'string' ? log : (log.log || log.message || '');
         if (msg.includes('context [')) {
-            return parseContextLog(msg);
+            const turns = parseContextLog(msg);
+            if (turns.length > contextTurns.length) {
+                contextTurns = turns;
+            }
         }
     }
 
-    // If no context logs found, try event-based parsing
-    return parseEventBasedLogs(logs);
+    // ===== 2. Try event-based parsing (from speech/TTS/RAG events) =====
+    const eventTurns = parseEventBasedLogs(logs, targetSessionId);
+
+    // ===== 3. No data from either → return empty =====
+    if (contextTurns.length === 0 && eventTurns.length === 0) {
+        return [];
+    }
+
+    // ===== 4. Only one method produced results → use that =====
+    if (contextTurns.length === 0) return eventTurns;
+    if (eventTurns.length === 0) return contextTurns;
+
+    // ===== 5. Both produced results → pick best, then merge gaps =====
+    const contextCompleteCount = contextTurns.filter(t => t.user_message && t.assistant_message).length;
+    const eventCompleteCount = eventTurns.filter(t => t.user_message && t.assistant_message).length;
+    const contextBotCount = contextTurns.filter(t => t.assistant_message).length;
+    const eventBotCount = eventTurns.filter(t => t.assistant_message).length;
+
+    let primary, secondary;
+
+    // Pick whichever has more COMPLETE turns (both user + assistant)
+    if (eventCompleteCount > contextCompleteCount) {
+        primary = eventTurns;
+        secondary = contextTurns;
+    } else if (contextCompleteCount > eventCompleteCount) {
+        primary = contextTurns;
+        secondary = eventTurns;
+    } else if (eventBotCount > contextBotCount) {
+        // Tied on complete count: prefer more bot responses (event-based captures TTS)
+        primary = eventTurns;
+        secondary = contextTurns;
+    } else if (contextBotCount > eventBotCount) {
+        primary = contextTurns;
+        secondary = eventTurns;
+    } else if (eventTurns.length > contextTurns.length) {
+        // Tied on everything quality-wise: prefer more total turns
+        primary = eventTurns;
+        secondary = contextTurns;
+    } else if (contextTurns.length > eventTurns.length) {
+        primary = contextTurns;
+        secondary = eventTurns;
+    } else {
+        // Complete tie: prefer event-based (captures latest TTS response)
+        primary = eventTurns;
+        secondary = contextTurns;
+    }
+
+    // ===== 6. Merge: fill missing fields in primary from secondary =====
+    for (let i = 0; i < primary.length && i < secondary.length; i++) {
+        if (!primary[i].assistant_message && secondary[i].assistant_message) {
+            primary[i].assistant_message = secondary[i].assistant_message;
+        }
+        if (!primary[i].user_message && secondary[i].user_message) {
+            primary[i].user_message = secondary[i].user_message;
+        }
+    }
+
+    return primary;
 }
 
 module.exports = {

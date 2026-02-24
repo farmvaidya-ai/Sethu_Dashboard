@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { campaignAPI } from '../services/api';
+import { campaignAPI, settingsAPI } from '../services/api';
 import toast from 'react-hot-toast';
 import { Upload, FileText, CheckCircle, AlertCircle, RefreshCw, RotateCcw, X, Phone, Play, Pause, Clock, ChevronDown, ChevronRight, ExternalLink, Trash2, Copy } from 'lucide-react';
 
@@ -24,14 +24,32 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
     // Multi-select state
     const [selectedCampaignIds, setSelectedCampaignIds] = useState(new Set());
 
+    // Line limits from system settings
+    const [lineLimits, setLineLimits] = useState({ total: 4, campaign: 2, calls: 2 });
+
     const [formData, setFormData] = useState({
         campaignName: '',
         retries: 2,
         retryInterval: 10,
         scheduleTime: '',
         scheduleEndTime: '',
-        throttle: 10 // seconds interval
+        callInterval: 10 // seconds between calls
     });
+
+    // Fetch line settings on mount
+    useEffect(() => {
+        const fetchLineSettings = async () => {
+            try {
+                const res = await settingsAPI.getThrottleSettings();
+                if (res.data?.throttle) {
+                    setLineLimits(res.data.throttle);
+                }
+            } catch (err) {
+                console.warn('Could not fetch line settings, using defaults');
+            }
+        };
+        fetchLineSettings();
+    }, []);
 
     const fetchCampaigns = useCallback(async () => {
         try {
@@ -259,11 +277,10 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
             data.append('schedule', JSON.stringify(schedule));
         }
 
-        if (formData.throttle) {
-            // Convert interval (seconds) to Calls Per Minute
-            // e.g. 10s -> 60/10 = 6 calls/min
-            // Ensure at least 1
-            const cpm = Math.max(1, Math.floor(60 / parseInt(formData.throttle || 10)));
+        if (formData.callInterval) {
+            // Convert call interval (seconds) to CPM, cap by campaign line limit
+            const intervalSec = Math.max(1, parseInt(formData.callInterval) || 10);
+            const cpm = Math.max(1, Math.min(Math.floor(60 / intervalSec), lineLimits.campaign));
             data.append('throttle', cpm);
         }
 
@@ -272,7 +289,7 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
             await campaignAPI.createCampaign(data);
             toast.success('Campaign initiated! Contacts are being uploaded.');
             setFile(null);
-            setFormData({ campaignName: '', retries: 2, retryInterval: 10, scheduleTime: '', scheduleEndTime: '', throttle: 10 });
+            setFormData({ campaignName: '', retries: 2, retryInterval: 10, scheduleTime: '', scheduleEndTime: '', callInterval: 10 });
             fetchCampaigns();
             setSubTab('inspect');
         } catch (error) {
@@ -388,6 +405,7 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
         if (s === 'completed' || s === 'stopped') return 'Completed';
         if (s === 'failed' || s === 'canceled') return 'Failed';
         if (s === 'paused') return 'Paused';
+        if (s === 'in-progress' || s === 'inprogress' || s === 'running') return 'Running';
 
         // Derive from stats if available
         const stats = camp.stats || {};
@@ -506,9 +524,66 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
                                     <div>
                                         <Upload size={32} color="#94a3b8" style={{ marginBottom: '8px' }} />
                                         <p style={{ color: '#64748b', margin: '0', fontSize: '0.9rem' }}>Click or drag to upload CSV/Excel</p>
-                                        <p style={{ color: '#94a3b8', margin: '4px 0 0', fontSize: '0.8rem' }}>Must contain a "phone_number" column</p>
+                                        <p style={{ color: '#94a3b8', margin: '4px 0 0', fontSize: '0.8rem' }}>Columns: number, Name (see format below)</p>
                                     </div>
                                 )}
+                            </div>
+
+                            {/* Required CSV Format Guide */}
+                            <div style={{
+                                marginTop: '12px', padding: '14px 16px', borderRadius: '10px',
+                                background: '#f0f9ff', border: '1px solid #bae6fd',
+                                fontSize: '0.82rem', color: '#0c4a6e'
+                            }}>
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                    <span style={{ fontWeight: '600', fontSize: '0.85rem' }}>
+                                        Required File Format
+                                    </span>
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            const csv = 'number,Name\n7382700894,Praveen\n9154708539,Kowshik\n';
+                                            const blob = new Blob([csv], { type: 'text/csv' });
+                                            const url = URL.createObjectURL(blob);
+                                            const a = document.createElement('a');
+                                            a.href = url; a.download = 'Sample_Contacts.csv'; a.click();
+                                            URL.revokeObjectURL(url);
+                                        }}
+                                        style={{
+                                            padding: '4px 10px', borderRadius: '6px', fontSize: '0.75rem',
+                                            fontWeight: '600', border: '1px solid #7dd3fc', background: '#e0f2fe',
+                                            color: '#0369a1', cursor: 'pointer', transition: 'all 0.2s'
+                                        }}
+                                        onMouseOver={e => e.currentTarget.style.background = '#bae6fd'}
+                                        onMouseOut={e => e.currentTarget.style.background = '#e0f2fe'}
+                                    >
+                                        Download Sample
+                                    </button>
+                                </div>
+                                <table style={{
+                                    width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem',
+                                    background: 'white', borderRadius: '6px', overflow: 'hidden'
+                                }}>
+                                    <thead>
+                                        <tr style={{ background: '#e0f2fe' }}>
+                                            <th style={{ padding: '6px 12px', textAlign: 'left', fontWeight: '700', color: '#0c4a6e', borderBottom: '1px solid #bae6fd' }}>number</th>
+                                            <th style={{ padding: '6px 12px', textAlign: 'left', fontWeight: '700', color: '#0c4a6e', borderBottom: '1px solid #bae6fd' }}>Name</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr>
+                                            <td style={{ padding: '5px 12px', fontFamily: 'monospace', color: '#334155', borderBottom: '1px solid #e0f2fe' }}>7382700894</td>
+                                            <td style={{ padding: '5px 12px', color: '#334155', borderBottom: '1px solid #e0f2fe' }}>Praveen</td>
+                                        </tr>
+                                        <tr>
+                                            <td style={{ padding: '5px 12px', fontFamily: 'monospace', color: '#334155' }}>9154708539</td>
+                                            <td style={{ padding: '5px 12px', color: '#334155' }}>Kowshik</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                                <p style={{ margin: '8px 0 0', color: '#0369a1', fontSize: '0.78rem', lineHeight: '1.4' }}>
+                                    Column <b>number</b> is required (10-digit mobile). Column <b>Name</b> is optional. Save as <b>.csv</b> or <b>.xlsx</b>.
+                                </p>
                             </div>
                         </div>
                         {/* Schedule */}
@@ -557,12 +632,21 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
                                     />
                                 </div>
                                 <div>
-                                    <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500', fontSize: '0.9rem', color: '#374151' }}>Call Interval (sec)</label>
-                                    <input type="number" min="1" value={formData.throttle}
-                                        onChange={e => setFormData({ ...formData, throttle: e.target.value })}
+                                    <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500', fontSize: '0.9rem', color: '#374151' }}>
+                                        Call Interval (sec)
+                                        <span style={{ fontSize: '0.75rem', color: '#94a3b8', fontWeight: '400', marginLeft: '6px' }}>
+                                            campaign lines: {lineLimits.campaign}
+                                        </span>
+                                    </label>
+                                    <input type="number" min="5" max="300" value={formData.callInterval}
+                                        onChange={e => {
+                                            const val = parseInt(e.target.value) || 5;
+                                            setFormData({ ...formData, callInterval: Math.max(5, val) });
+                                        }}
                                         placeholder="10"
                                         style={{ width: '100%', padding: '10px 14px', borderRadius: '8px', border: '2px solid #edeff1', fontSize: '0.95rem', outline: 'none' }}
                                     />
+                                    <p style={{ margin: '4px 0 0', fontSize: '0.75rem', color: '#94a3b8' }}>Seconds between calls. Lines limit from Settings.</p>
                                 </div>
                             </div>
                         </div>
@@ -665,11 +749,12 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
                                         const isFailed = status === 'Failed' || status === 'Canceled';
                                         const isCompleted = status === 'Completed';
                                         const isPaused = status === 'Paused';
+                                        const isRunning = status === 'Running';
 
-                                        const cardBorderColor = isFailed ? '#ef4444' : isCompleted ? '#22c55e' : isPaused ? '#94a3b8' : '#e5e7eb';
-                                        const cardBg = isFailed ? '#fef2f2' : isCompleted ? '#f0fdf4' : 'white';
-                                        const badgeBg = isFailed ? '#fee2e2' : isCompleted ? '#dcfce7' : isPaused ? '#f1f5f9' : '#fef9c3';
-                                        const badgeColor = isFailed ? '#991b1b' : isCompleted ? '#166534' : isPaused ? '#475569' : '#854d0e';
+                                        const cardBorderColor = isFailed ? '#ef4444' : isCompleted ? '#22c55e' : isPaused ? '#94a3b8' : isRunning ? '#3b82f6' : '#e5e7eb';
+                                        const cardBg = isFailed ? '#fef2f2' : isCompleted ? '#f0fdf4' : isRunning ? '#eff6ff' : 'white';
+                                        const badgeBg = isFailed ? '#fee2e2' : isCompleted ? '#dcfce7' : isPaused ? '#f1f5f9' : isRunning ? '#dbeafe' : '#fef9c3';
+                                        const badgeColor = isFailed ? '#991b1b' : isCompleted ? '#166534' : isPaused ? '#475569' : isRunning ? '#1d4ed8' : '#854d0e';
 
                                         // Mock stats if not present (since list API often omits them)
                                         // In a real scenario, we'd need to fetch these or have the backend aggregate them.
@@ -998,7 +1083,14 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
                                                         </span>
                                                     </td>
                                                     <td style={{ padding: '1rem', fontSize: '0.85rem', color: '#64748b' }}>
-                                                        {call.duration || call.conversation_duration || '0'}s
+                                                        {(() => {
+                                                            const dur = parseInt(call.duration || call.conversation_duration || 0);
+                                                            if (dur <= 0) return '0s';
+                                                            if (dur < 60) return `${dur}s`;
+                                                            const m = Math.floor(dur / 60);
+                                                            const s = dur % 60;
+                                                            return `${m}m ${s}s`;
+                                                        })()}
                                                     </td>
                                                     <td style={{ padding: '1rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
                                                         {isSuccess && onNavigateToSession && (
