@@ -348,7 +348,9 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
         const s = (status || '').toLowerCase();
         if (s === 'completed' || s === 'answered' || s === 'completed-success') return '#22c55e';
         if (s.includes('fail') || s === 'busy' || s === 'no-answer' || s === 'noanswer' || s === 'canceled') return '#ef4444';
+        if (s === 'retrying') return '#f97316';
         if (s === 'in-progress' || s === 'ringing' || s === 'initiated' || s === 'queued') return '#f59e0b';
+        if (s === 'pending') return '#64748b';
         if (s === 'paused') return '#64748b';
         return '#94a3b8';
     };
@@ -357,7 +359,9 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
         const s = (status || '').toLowerCase();
         if (s === 'completed' || s === 'answered' || s === 'completed-success') return '#f0fdf4';
         if (s.includes('fail') || s === 'busy' || s === 'no-answer' || s === 'noanswer' || s === 'canceled') return '#fef2f2';
+        if (s === 'retrying') return '#fff7ed';
         if (s === 'in-progress' || s === 'ringing' || s === 'initiated' || s === 'queued') return '#fffbeb';
+        if (s === 'pending') return '#f1f5f9';
         if (s === 'paused') return '#f1f5f9';
         return '#f8fafc';
     };
@@ -367,7 +371,7 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
         const s = (c.status || c.Status || '').toLowerCase();
         if (callFilter === 'successful') return s === 'completed' || s === 'answered' || s === 'completed-success';
         if (callFilter === 'failed') return s.includes('fail') || s === 'busy' || s === 'no-answer' || s === 'noanswer' || s === 'canceled';
-        if (callFilter === 'pending') return s === 'queued' || s === 'in-progress' || s === 'ringing' || s === 'initiated';
+        if (callFilter === 'pending') return s === 'pending' || s === 'retrying' || s === 'queued' || s === 'in-progress' || s === 'ringing' || s === 'initiated';
         return true;
     });
 
@@ -1078,6 +1082,12 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
                                             const status = (call.status || call.Status || 'unknown').toLowerCase();
                                             const isSuccess = status === 'completed' || status === 'answered' || status === 'completed-success';
                                             const isFailure = status.includes('fail') || status === 'busy' || status === 'no-answer' || status === 'noanswer' || status === 'canceled';
+                                            const isRetrying = status === 'retrying';
+                                            const isPending = status === 'pending';
+                                            const attemptsDone = call.attempts_done || 0;
+                                            const retriesLeft = call.retries_left;
+                                            const totalRetries = (retriesLeft !== null && retriesLeft !== undefined) ? attemptsDone + retriesLeft : null;
+                                            const campaignStatus = (selectedCampaign?.status || '').toLowerCase();
 
                                             return (
                                                 <tr key={call.sid || call.id || i} style={{ borderBottom: '1px solid #f1f5f9', background: 'white' }}>
@@ -1088,16 +1098,71 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
                                                         {call.Name || call.name || call.first_name || '-'}
                                                     </td>
                                                     <td style={{ padding: '1rem' }}>
-                                                        <span style={{
-                                                            display: 'inline-flex', alignItems: 'center', gap: '6px',
-                                                            padding: '4px 10px', borderRadius: '20px', fontSize: '0.75rem', fontWeight: '600',
-                                                            background: isSuccess ? '#dcfce7' : isFailure ? '#fee2e2' : '#fef9c3',
-                                                            color: isSuccess ? '#166534' : isFailure ? '#991b1b' : '#854d0e',
-                                                            border: `1px solid ${isSuccess ? '#bbf7d0' : isFailure ? '#fecaca' : '#fde68a'}`
-                                                        }}>
-                                                            {isSuccess ? <CheckCircle size={12} /> : <AlertCircle size={12} />}
-                                                            {status.toUpperCase()}
-                                                        </span>
+                                                        {(() => {
+                                                            let badgeText, badgeColor, badgeBg, badgeBorder, icon;
+                                                            if (isSuccess) {
+                                                                badgeText = 'COMPLETED'; badgeColor = '#166534'; badgeBg = '#dcfce7'; badgeBorder = '#bbf7d0';
+                                                                icon = <CheckCircle size={12} />;
+                                                            } else if (isFailure) {
+                                                                badgeText = attemptsDone > 1 ? `FAILED (${attemptsDone}× tried)` : 'FAILED';
+                                                                badgeColor = '#991b1b'; badgeBg = '#fee2e2'; badgeBorder = '#fecaca';
+                                                                icon = <AlertCircle size={12} />;
+                                                            } else if (isRetrying) {
+                                                                const retryLabel = totalRetries ? `RETRY ${attemptsDone}/${totalRetries}` : 'RETRYING';
+                                                                let timeHint = '';
+                                                                if (call.retry_after) {
+                                                                    const minsLeft = Math.max(0, Math.round((new Date(call.retry_after) - Date.now()) / 60000));
+                                                                    timeHint = minsLeft > 0 ? ` • ${minsLeft}m` : ' • soon';
+                                                                }
+                                                                badgeText = retryLabel + timeHint;
+                                                                badgeColor = '#c2410c'; badgeBg = '#fff7ed'; badgeBorder = '#fed7aa';
+                                                                icon = <RefreshCw size={12} />;
+                                                            } else if (isPending) {
+                                                                const isCampaignRunning = campaignStatus === 'in-progress' || campaignStatus === 'inprogress' || campaignStatus === 'created' || campaignStatus === 'scheduled';
+                                                                const isCampaignPaused = campaignStatus === 'paused';
+                                                                const isCampaignDone = campaignStatus === 'completed' || campaignStatus === 'failed';
+                                                                if (isCampaignRunning) {
+                                                                    badgeText = 'WAITING'; badgeColor = '#475569'; badgeBg = '#f1f5f9'; badgeBorder = '#cbd5e1';
+                                                                    icon = <Clock size={12} />;
+                                                                } else if (isCampaignPaused) {
+                                                                    badgeText = 'ON HOLD'; badgeColor = '#92400e'; badgeBg = '#fffbeb'; badgeBorder = '#fde68a';
+                                                                    icon = <Pause size={12} />;
+                                                                } else if (isCampaignDone) {
+                                                                    badgeText = 'NOT REACHED'; badgeColor = '#991b1b'; badgeBg = '#fef2f2'; badgeBorder = '#fecaca';
+                                                                    icon = <AlertCircle size={12} />;
+                                                                } else {
+                                                                    badgeText = 'QUEUED'; badgeColor = '#475569'; badgeBg = '#f1f5f9'; badgeBorder = '#cbd5e1';
+                                                                    icon = <Clock size={12} />;
+                                                                }
+                                                            } else {
+                                                                badgeText = status.toUpperCase(); badgeColor = '#854d0e'; badgeBg = '#fef9c3'; badgeBorder = '#fde68a';
+                                                                icon = <AlertCircle size={12} />;
+                                                            }
+                                                            return (
+                                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                                                                    <span style={{
+                                                                        display: 'inline-flex', alignItems: 'center', gap: '6px',
+                                                                        padding: '4px 10px', borderRadius: '20px', fontSize: '0.75rem', fontWeight: '600',
+                                                                        background: badgeBg, color: badgeColor, border: `1px solid ${badgeBorder}`, width: 'fit-content'
+                                                                    }}>{icon}{badgeText}</span>
+                                                                    {(isRetrying || (isFailure && attemptsDone > 0)) && (
+                                                                        <span style={{ fontSize: '0.7rem', color: '#94a3b8', paddingLeft: '2px' }}>
+                                                                            {attemptsDone} attempt{attemptsDone !== 1 ? 's' : ''} made
+                                                                        </span>
+                                                                    )}
+                                                                    {isPending && (() => {
+                                                                        const isCampaignRunning = campaignStatus === 'in-progress' || campaignStatus === 'inprogress' || campaignStatus === 'created' || campaignStatus === 'scheduled';
+                                                                        const isCampaignPaused = campaignStatus === 'paused';
+                                                                        const isCampaignDone = campaignStatus === 'completed' || campaignStatus === 'failed';
+                                                                        const hint = isCampaignRunning ? 'In queue — will be called shortly'
+                                                                            : isCampaignPaused ? 'Campaign paused before this call'
+                                                                            : isCampaignDone ? 'Campaign ended before this call'
+                                                                            : null;
+                                                                        return hint ? <span style={{ fontSize: '0.7rem', color: '#94a3b8', paddingLeft: '2px' }}>{hint}</span> : null;
+                                                                    })()}
+                                                                </div>
+                                                            );
+                                                        })()}
                                                     </td>
                                                     <td style={{ padding: '1rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
                                                         {isSuccess && onNavigateToSession && (

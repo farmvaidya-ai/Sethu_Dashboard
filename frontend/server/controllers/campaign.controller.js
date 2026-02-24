@@ -257,6 +257,13 @@ const processCampaignCalls = async (campaignId, contacts, callerId, appId, callI
     // Slot-based concurrency: track active lines
     let activeLines = 0;
 
+    // Update or insert a call result record (keyed by phone number)
+    const updateCallResult = (number, newRecord) => {
+        const idx = callResults.findIndex(r => r.number === number);
+        if (idx > -1) callResults.splice(idx, 1, newRecord);
+        else callResults.push(newRecord);
+    };
+
     console.log(`📞 [Campaign ${campaignId}] Starting slot-based progressive calls: ${contacts.length} contacts, ${concurrentLines} max lines, ${callIntervalSec}s between calls`);
 
     // Make a single call attempt (no retry loop — caller handles scheduling retries)
@@ -272,11 +279,11 @@ const processCampaignCalls = async (campaignId, contacts, callerId, appId, callI
                 console.log(`📞 [Campaign ${campaignId}] Call ${contactIndex}/${contacts.length} to ${contact.number} ended: ${finalStatus.status} (${finalStatus.duration}s)`);
 
                 if (finalStatus.status === 'completed' || finalStatus.status === 'timeout') {
-                    callResults.push({
+                    updateCallResult(contact.number, {
                         number: contact.number,
                         name: contact.first_name,
                         status: 'completed',
-                        attempt: attempt + 1,
+                        attempts_done: attempt + 1,
                         call_sid: callSid,
                         duration: finalStatus.duration,
                         exotel_status: finalStatus.status,
@@ -291,11 +298,11 @@ const processCampaignCalls = async (campaignId, contacts, callerId, appId, callI
                 }
             } else {
                 // No SID — treat as initiated (fire-and-forget success)
-                callResults.push({
+                updateCallResult(contact.number, {
                     number: contact.number,
                     name: contact.first_name,
                     status: 'completed',
-                    attempt: attempt + 1,
+                    attempts_done: attempt + 1,
                     call_sid: null,
                     timestamp: new Date().toISOString()
                 });
@@ -355,18 +362,30 @@ const processCampaignCalls = async (campaignId, contacts, callerId, appId, callI
                 const callPromise = processOneAttempt(item.contact, item.contactIndex, item.attempt)
                     .then(({ success, shouldRetry, error }) => {
                         if (!success && shouldRetry) {
-                            // Schedule retry — do NOT hold the line slot
+                            // Schedule retry — release line immediately
                             const retryAfter = Date.now() + retryIntervalMin * 60 * 1000;
-                            console.log(`📅 [Campaign ${campaignId}] Will retry ${item.contact.number} in ${retryIntervalMin}min (attempt ${item.attempt + 1}/${retriesCount})`);
-                            retryHold.push({ ...item, attempt: item.attempt + 1, retryAfter });
+                            const attemptsDone = item.attempt + 1;
+                            const retriesLeft = retriesCount - attemptsDone;
+                            console.log(`📅 [Campaign ${campaignId}] Will retry ${item.contact.number} in ${retryIntervalMin}min (attempt ${attemptsDone}/${retriesCount})`);
+                            // Write retrying status so UI shows progress immediately
+                            updateCallResult(item.contact.number, {
+                                number: item.contact.number,
+                                name: item.contact.first_name,
+                                status: 'retrying',
+                                attempts_done: attemptsDone,
+                                retries_left: retriesLeft,
+                                retry_after: new Date(retryAfter).toISOString(),
+                                timestamp: new Date().toISOString()
+                            });
+                            retryHold.push({ ...item, attempt: attemptsDone, retryAfter });
                         } else if (!success) {
                             // All attempts exhausted
                             failedCalls++;
-                            callResults.push({
+                            updateCallResult(item.contact.number, {
                                 number: item.contact.number,
                                 name: item.contact.first_name,
                                 status: 'failed',
-                                attempt: item.attempt + 1,
+                                attempts_done: item.attempt + 1,
                                 error: error || 'Unknown error',
                                 timestamp: new Date().toISOString()
                             });
@@ -781,12 +800,15 @@ export const getCampaignCallDetails = async (req, res) => {
                         id: cr.call_sid || `pending_${idx}`,
                         to: contact.number,
                         from: '',
+                        name: contact.first_name || '',
                         status: cr.status || 'pending',
                         date_created: cr.timestamp || null,
                         duration: cr.duration || 0,
                         first_name: contact.first_name || '',
                         error: cr.error || null,
-                        attempt: cr.attempt || 0,
+                        attempts_done: cr.attempts_done || 0,
+                        retries_left: cr.retries_left !== undefined ? cr.retries_left : null,
+                        retry_after: cr.retry_after || null,
                         _local: true
                     }
                 };
@@ -847,12 +869,12 @@ export const resumeCampaign = async (req, res) => {
                 return res.status(400).json({ error: `Campaign is ${campaign.status}, cannot resume` });
             }
 
-            // Figure out remaining contacts (not yet called or failed)
-            const callResults = campaign.call_results || {};
+            // Figure out remaining contacts (not yet called, failed, or still retrying)
+            const callResultsArr = Array.isArray(campaign.call_results) ? campaign.call_results : [];
             const contacts = campaign.contacts || [];
             const remaining = contacts.filter(c => {
-                const cr = callResults[c.number];
-                return !cr || cr.status === 'failed';
+                const cr = callResultsArr.find(r => r.number === c.number);
+                return !cr || cr.status === 'failed' || cr.status === 'retrying' || cr.status === 'pending';
             });
 
             if (remaining.length === 0) {
