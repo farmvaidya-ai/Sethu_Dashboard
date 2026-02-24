@@ -72,7 +72,18 @@ class ExotelService {
             throw error;
         }
     }
-
+    // Fetch contacts actually in a list (to verify they were added)
+    async getListContacts(listSid) {
+        try {
+            const auth = Buffer.from(`${this.apiKey}:${this.apiToken}`).toString('base64');
+            const url = `https://${this.subdomain}/v2/accounts/${this.accountSid}/lists/${listSid}/contacts`;
+            const response = await axios.get(url, { headers: { 'Authorization': `Basic ${auth}` } });
+            return response.data;
+        } catch (error) {
+            console.error(`Exotel getListContacts error: ${error.response?.data ? JSON.stringify(error.response.data) : error.message}`);
+            throw error;
+        }
+    }
 
 
     // Fetch all contacts with pagination
@@ -106,6 +117,19 @@ class ExotelService {
             console.error(`Exotel getAllContacts error: ${error.message}`);
             // If 404/empty, return empty array
             return [];
+        }
+    }
+
+    // Get list details (to check contact_count)
+    async getListDetails(listSid) {
+        try {
+            const auth = Buffer.from(`${this.apiKey}:${this.apiToken}`).toString('base64');
+            const url = `https://${this.subdomain}/v2/accounts/${this.accountSid}/lists/${listSid}`;
+            const response = await axios.get(url, { headers: { 'Authorization': `Basic ${auth}` } });
+            return response.data;
+        } catch (error) {
+            console.error(`Exotel getListDetails error: ${error.response?.data ? JSON.stringify(error.response.data) : error.message}`);
+            throw error;
         }
     }
 

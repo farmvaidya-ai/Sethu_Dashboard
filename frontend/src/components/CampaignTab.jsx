@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { campaignAPI } from '../services/api';
+import { campaignAPI, settingsAPI } from '../services/api';
 import toast from 'react-hot-toast';
 import { Upload, FileText, CheckCircle, AlertCircle, RefreshCw, RotateCcw, X, Phone, Play, Pause, Clock, ChevronDown, ChevronRight, ExternalLink, Trash2, Copy } from 'lucide-react';
 
@@ -24,14 +24,33 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
     // Multi-select state
     const [selectedCampaignIds, setSelectedCampaignIds] = useState(new Set());
 
+    // Line limits from system settings
+    const [lineLimits, setLineLimits] = useState({ total: 4, campaign: 2, calls: 2 });
+
     const [formData, setFormData] = useState({
         campaignName: '',
         retries: 2,
         retryInterval: 10,
-        scheduleTime: '',
-        scheduleEndTime: '',
-        throttle: 10 // seconds interval
+        scheduleTime: '',       // full datetime: when campaign first starts
+        dailyEndTime: '',       // HH:MM: daily cutoff time
+        dailyStartTime: '09:00', // HH:MM: daily resume time for subsequent days
+        callInterval: 10 // seconds between calls
     });
+
+    // Fetch line settings on mount
+    useEffect(() => {
+        const fetchLineSettings = async () => {
+            try {
+                const res = await settingsAPI.getThrottleSettings();
+                if (res.data?.throttle) {
+                    setLineLimits(res.data.throttle);
+                }
+            } catch (err) {
+                console.warn('Could not fetch line settings, using defaults');
+            }
+        };
+        fetchLineSettings();
+    }, []);
 
     const fetchCampaigns = useCallback(async () => {
         try {
@@ -253,17 +272,17 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
 
         const schedule = {};
         if (formData.scheduleTime) schedule.send_at = new Date(formData.scheduleTime).toISOString();
-        if (formData.scheduleEndTime) schedule.end_at = new Date(formData.scheduleEndTime).toISOString();
+        if (formData.dailyEndTime) schedule.daily_end_time = formData.dailyEndTime;   // "HH:MM"
+        if (formData.dailyStartTime) schedule.daily_start_time = formData.dailyStartTime; // "HH:MM"
 
         if (Object.keys(schedule).length > 0) {
             data.append('schedule', JSON.stringify(schedule));
         }
 
-        if (formData.throttle) {
-            // Convert interval (seconds) to Calls Per Minute
-            // e.g. 10s -> 60/10 = 6 calls/min
-            // Ensure at least 1
-            const cpm = Math.max(1, Math.floor(60 / parseInt(formData.throttle || 10)));
+        if (formData.callInterval) {
+            // Convert call interval (seconds) to CPM, cap by campaign line limit
+            const intervalSec = Math.max(1, parseInt(formData.callInterval) || 10);
+            const cpm = Math.max(1, Math.min(Math.floor(60 / intervalSec), lineLimits.campaign));
             data.append('throttle', cpm);
         }
 
@@ -272,7 +291,7 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
             await campaignAPI.createCampaign(data);
             toast.success('Campaign initiated! Contacts are being uploaded.');
             setFile(null);
-            setFormData({ campaignName: '', retries: 2, retryInterval: 10, scheduleTime: '', scheduleEndTime: '', throttle: 10 });
+            setFormData({ campaignName: '', retries: 2, retryInterval: 10, scheduleTime: '', dailyEndTime: '', dailyStartTime: '09:00', callInterval: 10 });
             fetchCampaigns();
             setSubTab('inspect');
         } catch (error) {
@@ -329,7 +348,9 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
         const s = (status || '').toLowerCase();
         if (s === 'completed' || s === 'answered' || s === 'completed-success') return '#22c55e';
         if (s.includes('fail') || s === 'busy' || s === 'no-answer' || s === 'noanswer' || s === 'canceled') return '#ef4444';
+        if (s === 'retrying') return '#f97316';
         if (s === 'in-progress' || s === 'ringing' || s === 'initiated' || s === 'queued') return '#f59e0b';
+        if (s === 'pending') return '#64748b';
         if (s === 'paused') return '#64748b';
         return '#94a3b8';
     };
@@ -338,7 +359,9 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
         const s = (status || '').toLowerCase();
         if (s === 'completed' || s === 'answered' || s === 'completed-success') return '#f0fdf4';
         if (s.includes('fail') || s === 'busy' || s === 'no-answer' || s === 'noanswer' || s === 'canceled') return '#fef2f2';
+        if (s === 'retrying') return '#fff7ed';
         if (s === 'in-progress' || s === 'ringing' || s === 'initiated' || s === 'queued') return '#fffbeb';
+        if (s === 'pending') return '#f1f5f9';
         if (s === 'paused') return '#f1f5f9';
         return '#f8fafc';
     };
@@ -348,7 +371,7 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
         const s = (c.status || c.Status || '').toLowerCase();
         if (callFilter === 'successful') return s === 'completed' || s === 'answered' || s === 'completed-success';
         if (callFilter === 'failed') return s.includes('fail') || s === 'busy' || s === 'no-answer' || s === 'noanswer' || s === 'canceled';
-        if (callFilter === 'pending') return s === 'queued' || s === 'in-progress' || s === 'ringing' || s === 'initiated';
+        if (callFilter === 'pending') return s === 'pending' || s === 'retrying' || s === 'queued' || s === 'in-progress' || s === 'ringing' || s === 'initiated';
         return true;
     });
 
@@ -388,6 +411,7 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
         if (s === 'completed' || s === 'stopped') return 'Completed';
         if (s === 'failed' || s === 'canceled') return 'Failed';
         if (s === 'paused') return 'Paused';
+        if (s === 'in-progress' || s === 'inprogress' || s === 'running') return 'Running';
 
         // Derive from stats if available
         const stats = camp.stats || {};
@@ -463,6 +487,22 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
                         )}
                     </div>
 
+                    {/* Campaign Creation Instructions */}
+                    <div style={{ background: '#f0f9ff', borderRadius: '10px', border: '1px solid #bae6fd', padding: '1.25rem' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '0.75rem' }}>
+                            <FileText size={16} color="#0284c7" />
+                            <span style={{ fontWeight: '700', fontSize: '0.9rem', color: '#0c4a6e' }}>How to create a campaign</span>
+                        </div>
+                        <ol style={{ margin: 0, padding: '0 0 0 1.2rem', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                            <li style={{ color: '#0369a1', fontSize: '0.85rem', lineHeight: '1.5' }}><strong>Telephony setup</strong> – Ensure the Exophone (virtual number) is configured in the agent sidebar before launching a campaign.</li>
+                            <li style={{ color: '#0369a1', fontSize: '0.85rem', lineHeight: '1.5' }}><strong>Campaign Name</strong> – Give a descriptive name (e.g., <em>July Outreach</em>). Leave blank for an auto-generated name.</li>
+                            <li style={{ color: '#0369a1', fontSize: '0.85rem', lineHeight: '1.5' }}><strong>Upload contacts</strong> – Prepare a CSV/Excel file with a <code style={{ background: '#e0f2fe', padding: '1px 4px', borderRadius: '3px' }}>number</code> column (10-digit mobile) and an optional <code style={{ background: '#e0f2fe', padding: '1px 4px', borderRadius: '3px' }}>Name</code> column. Download the sample file for reference.</li>
+                            <li style={{ color: '#0369a1', fontSize: '0.85rem', lineHeight: '1.5' }}><strong>Daily Schedule (optional)</strong> – Set a <em>Start Time</em> (date &amp; time) for when the campaign first begins. Set a <em>Daily End Time</em> (e.g., <code style={{ background: '#e0f2fe', padding: '1px 4px', borderRadius: '3px' }}>18:00</code>) to stop calls each evening. Set a <em>Next Day Start</em> time (e.g., <code style={{ background: '#e0f2fe', padding: '1px 4px', borderRadius: '3px' }}>09:00</code>) — if contacts remain when the day ends, the campaign automatically pauses and resumes at that time the next morning, continuing day-by-day until every contact is called.</li>
+                            <li style={{ color: '#0369a1', fontSize: '0.85rem', lineHeight: '1.5' }}><strong>No. of Tries</strong> – Number of retry attempts for unanswered or failed calls (0 = no retry, max 5). Set the retry interval (in minutes) between attempts.</li>
+                            <li style={{ color: '#0369a1', fontSize: '0.85rem', lineHeight: '1.5' }}><strong>Launch</strong> – Click <strong>Launch Campaign</strong>. Track progress in the <em>Inspect Campaigns</em> tab.</li>
+                        </ol>
+                    </div>
+
                     <form onSubmit={handleCreate} style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
                         <div>
                             <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500', fontSize: '0.9rem', color: '#374151' }}>Campaign Name</label>
@@ -506,48 +546,120 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
                                     <div>
                                         <Upload size={32} color="#94a3b8" style={{ marginBottom: '8px' }} />
                                         <p style={{ color: '#64748b', margin: '0', fontSize: '0.9rem' }}>Click or drag to upload CSV/Excel</p>
-                                        <p style={{ color: '#94a3b8', margin: '4px 0 0', fontSize: '0.8rem' }}>Must contain a "phone_number" column</p>
+                                        <p style={{ color: '#94a3b8', margin: '4px 0 0', fontSize: '0.8rem' }}>Columns: number, Name (see format below)</p>
                                     </div>
                                 )}
                             </div>
+
+                            {/* Required CSV Format Guide */}
+                            <div style={{
+                                marginTop: '12px', padding: '14px 16px', borderRadius: '10px',
+                                background: '#f0f9ff', border: '1px solid #bae6fd',
+                                fontSize: '0.82rem', color: '#0c4a6e'
+                            }}>
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                    <span style={{ fontWeight: '600', fontSize: '0.85rem' }}>
+                                        Required File Format
+                                    </span>
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            const csv = 'number,Name\n7382700894,Praveen\n9154708539,Kowshik\n';
+                                            const blob = new Blob([csv], { type: 'text/csv' });
+                                            const url = URL.createObjectURL(blob);
+                                            const a = document.createElement('a');
+                                            a.href = url; a.download = 'Sample_Contacts.csv'; a.click();
+                                            URL.revokeObjectURL(url);
+                                        }}
+                                        style={{
+                                            padding: '4px 10px', borderRadius: '6px', fontSize: '0.75rem',
+                                            fontWeight: '600', border: '1px solid #7dd3fc', background: '#e0f2fe',
+                                            color: '#0369a1', cursor: 'pointer', transition: 'all 0.2s'
+                                        }}
+                                        onMouseOver={e => e.currentTarget.style.background = '#bae6fd'}
+                                        onMouseOut={e => e.currentTarget.style.background = '#e0f2fe'}
+                                    >
+                                        Download Sample
+                                    </button>
+                                </div>
+                                <table style={{
+                                    width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem',
+                                    background: 'white', borderRadius: '6px', overflow: 'hidden'
+                                }}>
+                                    <thead>
+                                        <tr style={{ background: '#e0f2fe' }}>
+                                            <th style={{ padding: '6px 12px', textAlign: 'left', fontWeight: '700', color: '#0c4a6e', borderBottom: '1px solid #bae6fd' }}>number</th>
+                                            <th style={{ padding: '6px 12px', textAlign: 'left', fontWeight: '700', color: '#0c4a6e', borderBottom: '1px solid #bae6fd' }}>Name</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr>
+                                            <td style={{ padding: '5px 12px', fontFamily: 'monospace', color: '#334155', borderBottom: '1px solid #e0f2fe' }}>7382700894</td>
+                                            <td style={{ padding: '5px 12px', color: '#334155', borderBottom: '1px solid #e0f2fe' }}>Praveen</td>
+                                        </tr>
+                                        <tr>
+                                            <td style={{ padding: '5px 12px', fontFamily: 'monospace', color: '#334155' }}>9154708539</td>
+                                            <td style={{ padding: '5px 12px', color: '#334155' }}>Kowshik</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                                <p style={{ margin: '8px 0 0', color: '#0369a1', fontSize: '0.78rem', lineHeight: '1.4' }}>
+                                    Column <b>number</b> is required (10-digit mobile). Column <b>Name</b> is optional. Save as <b>.csv</b> or <b>.xlsx</b>.
+                                </p>
+                            </div>
                         </div>
                         {/* Schedule */}
-                        <div className="campaign-grid-2">
-                            <div>
-                                <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500', fontSize: '0.9rem', color: '#374151' }}>Start Time (Optional)</label>
-                                <input
-                                    type="datetime-local"
-                                    value={formData.scheduleTime}
-                                    onChange={e => setFormData({ ...formData, scheduleTime: e.target.value })}
-                                    min={new Date().toISOString().slice(0, 16)}
-                                    style={{ width: '100%', padding: '10px 14px', borderRadius: '8px', border: '2px solid #e5e7eb', fontSize: '0.95rem', outline: 'none' }}
-                                />
+                        <div style={{ background: '#f0fdf4', padding: '1.25rem', borderRadius: '12px', border: '1px solid #bbf7d0' }}>
+                            <h4 style={{ margin: '0 0 1rem', fontSize: '0.85rem', fontWeight: '700', textTransform: 'uppercase', color: '#166534', letterSpacing: '0.05em' }}>Daily Schedule (Optional)</h4>
+                            <div className="campaign-grid-3">
+                                <div>
+                                    <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500', fontSize: '0.9rem', color: '#374151' }}>Start Time</label>
+                                    <input
+                                        type="datetime-local"
+                                        value={formData.scheduleTime}
+                                        onChange={e => setFormData({ ...formData, scheduleTime: e.target.value })}
+                                        min={new Date().toISOString().slice(0, 16)}
+                                        style={{ width: '100%', padding: '10px 14px', borderRadius: '8px', border: '2px solid #e5e7eb', fontSize: '0.9rem', outline: 'none' }}
+                                    />
+                                    <p style={{ margin: '4px 0 0', fontSize: '0.75rem', color: '#6b7280' }}>When the campaign first begins</p>
+                                </div>
+                                <div>
+                                    <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500', fontSize: '0.9rem', color: '#374151' }}>Daily End Time</label>
+                                    <input
+                                        type="time"
+                                        value={formData.dailyEndTime}
+                                        onChange={e => setFormData({ ...formData, dailyEndTime: e.target.value })}
+                                        style={{ width: '100%', padding: '10px 14px', borderRadius: '8px', border: '2px solid #e5e7eb', fontSize: '0.9rem', outline: 'none' }}
+                                    />
+                                    <p style={{ margin: '4px 0 0', fontSize: '0.75rem', color: '#6b7280' }}>Calls stop at this time each day</p>
+                                </div>
+                                <div>
+                                    <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500', fontSize: '0.9rem', color: '#374151' }}>Next Day Start</label>
+                                    <input
+                                        type="time"
+                                        value={formData.dailyStartTime}
+                                        onChange={e => setFormData({ ...formData, dailyStartTime: e.target.value })}
+                                        style={{ width: '100%', padding: '10px 14px', borderRadius: '8px', border: '2px solid #e5e7eb', fontSize: '0.9rem', outline: 'none' }}
+                                    />
+                                    <p style={{ margin: '4px 0 0', fontSize: '0.75rem', color: '#6b7280' }}>Remaining calls resume here the next day</p>
+                                </div>
                             </div>
-                            <div>
-                                <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500', fontSize: '0.9rem', color: '#374151' }}>End Time (Optional)</label>
-                                <input
-                                    type="datetime-local"
-                                    value={formData.scheduleEndTime}
-                                    onChange={e => setFormData({ ...formData, scheduleEndTime: e.target.value })}
-                                    min={formData.scheduleTime || new Date().toISOString().slice(0, 16)}
-                                    style={{ width: '100%', padding: '10px 14px', borderRadius: '8px', border: '2px solid #e5e7eb', fontSize: '0.95rem', outline: 'none' }}
-                                />
-                            </div>
+                            <p style={{ margin: '0.75rem 0 0', fontSize: '0.8rem', color: '#166534' }}>If all contacts are not reached before Daily End Time, the campaign auto-pauses and resumes at Next Day Start the following morning — repeating until every contact is called.</p>
                         </div>
-                        <p style={{ fontSize: '0.8rem', color: '#94a3b8', marginTop: '-10px' }}>Leave blank to start immediately. End time auto-stops the campaign.</p>
 
 
 
                         {/* Advanced Options */}
                         <div style={{ background: '#f9fafb', padding: '1.5rem', borderRadius: '12px', border: '1px solid #e5e7eb', marginTop: '0.5rem' }}>
                             <h4 style={{ margin: '0 0 1rem', fontSize: '0.85rem', fontWeight: '700', textTransform: 'uppercase', color: '#64748b', letterSpacing: '0.05em' }}>Advanced Options</h4>
-                            <div className="campaign-grid-3">
+                            <div className="campaign-grid-2">
                                 <div>
-                                    <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500', fontSize: '0.9rem', color: '#374151' }}>Retries</label>
+                                    <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500', fontSize: '0.9rem', color: '#374151' }}>No. of Tries</label>
                                     <input type="number" min="0" max="5" value={formData.retries}
                                         onChange={e => setFormData({ ...formData, retries: e.target.value })}
                                         style={{ width: '100%', padding: '10px 14px', borderRadius: '8px', border: '2px solid #edeff1', fontSize: '0.95rem', outline: 'none' }}
                                     />
+                                    <p style={{ margin: '4px 0 0', fontSize: '0.75rem', color: '#94a3b8' }}>0 = single attempt, up to 5 retries on failure</p>
                                 </div>
                                 <div>
                                     <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500', fontSize: '0.9rem', color: '#374151' }}>Retry Interval (min)</label>
@@ -555,14 +667,7 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
                                         onChange={e => setFormData({ ...formData, retryInterval: e.target.value })}
                                         style={{ width: '100%', padding: '10px 14px', borderRadius: '8px', border: '2px solid #edeff1', fontSize: '0.95rem', outline: 'none' }}
                                     />
-                                </div>
-                                <div>
-                                    <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500', fontSize: '0.9rem', color: '#374151' }}>Call Interval (sec)</label>
-                                    <input type="number" min="1" value={formData.throttle}
-                                        onChange={e => setFormData({ ...formData, throttle: e.target.value })}
-                                        placeholder="10"
-                                        style={{ width: '100%', padding: '10px 14px', borderRadius: '8px', border: '2px solid #edeff1', fontSize: '0.95rem', outline: 'none' }}
-                                    />
+                                    <p style={{ margin: '4px 0 0', fontSize: '0.75rem', color: '#94a3b8' }}>Minutes to wait before retrying a failed call</p>
                                 </div>
                             </div>
                         </div>
@@ -665,11 +770,12 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
                                         const isFailed = status === 'Failed' || status === 'Canceled';
                                         const isCompleted = status === 'Completed';
                                         const isPaused = status === 'Paused';
+                                        const isRunning = status === 'Running';
 
-                                        const cardBorderColor = isFailed ? '#ef4444' : isCompleted ? '#22c55e' : isPaused ? '#94a3b8' : '#e5e7eb';
-                                        const cardBg = isFailed ? '#fef2f2' : isCompleted ? '#f0fdf4' : 'white';
-                                        const badgeBg = isFailed ? '#fee2e2' : isCompleted ? '#dcfce7' : isPaused ? '#f1f5f9' : '#fef9c3';
-                                        const badgeColor = isFailed ? '#991b1b' : isCompleted ? '#166534' : isPaused ? '#475569' : '#854d0e';
+                                        const cardBorderColor = isFailed ? '#ef4444' : isCompleted ? '#22c55e' : isPaused ? '#94a3b8' : isRunning ? '#3b82f6' : '#e5e7eb';
+                                        const cardBg = isFailed ? '#fef2f2' : isCompleted ? '#f0fdf4' : isRunning ? '#eff6ff' : 'white';
+                                        const badgeBg = isFailed ? '#fee2e2' : isCompleted ? '#dcfce7' : isPaused ? '#f1f5f9' : isRunning ? '#dbeafe' : '#fef9c3';
+                                        const badgeColor = isFailed ? '#991b1b' : isCompleted ? '#166534' : isPaused ? '#475569' : isRunning ? '#1d4ed8' : '#854d0e';
 
                                         // Mock stats if not present (since list API often omits them)
                                         // In a real scenario, we'd need to fetch these or have the backend aggregate them.
@@ -909,6 +1015,7 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
                                     <div style={{ fontSize: '0.75rem', color: '#92400e' }}>{new Date(selectedCampaign.date_created).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
                                 </div>
                             </div>
+
                         </div>
                     </div>
 
@@ -965,17 +1072,22 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
                                             <th style={{ padding: '1rem', textAlign: 'left', fontWeight: '600', color: '#4b5563', fontSize: '0.85rem' }}>Phone Number</th>
                                             <th style={{ padding: '1rem', textAlign: 'left', fontWeight: '600', color: '#4b5563', fontSize: '0.85rem' }}>Contact Name</th>
                                             <th style={{ padding: '1rem', textAlign: 'left', fontWeight: '600', color: '#4b5563', fontSize: '0.85rem' }}>Status</th>
-                                            <th style={{ padding: '1rem', textAlign: 'left', fontWeight: '600', color: '#4b5563', fontSize: '0.85rem' }}>Duration</th>
                                             <th style={{ padding: '1rem', textAlign: 'left', fontWeight: '600', color: '#4b5563', fontSize: '0.85rem' }}>Actions</th>
                                         </tr>
                                     </thead>
                                     <tbody>
                                         {currentItems.length === 0 ? (
-                                            <tr><td colSpan={5} style={{ padding: '3rem', textAlign: 'center', color: '#94a3b8' }}>No calls match the filter.</td></tr>
+                                            <tr><td colSpan={4} style={{ padding: '3rem', textAlign: 'center', color: '#94a3b8' }}>No calls match the filter.</td></tr>
                                         ) : currentItems.map((call, i) => {
                                             const status = (call.status || call.Status || 'unknown').toLowerCase();
                                             const isSuccess = status === 'completed' || status === 'answered' || status === 'completed-success';
                                             const isFailure = status.includes('fail') || status === 'busy' || status === 'no-answer' || status === 'noanswer' || status === 'canceled';
+                                            const isRetrying = status === 'retrying';
+                                            const isPending = status === 'pending';
+                                            const attemptsDone = call.attempts_done || 0;
+                                            const retriesLeft = call.retries_left;
+                                            const totalRetries = (retriesLeft !== null && retriesLeft !== undefined) ? attemptsDone + retriesLeft : null;
+                                            const campaignStatus = (selectedCampaign?.status || '').toLowerCase();
 
                                             return (
                                                 <tr key={call.sid || call.id || i} style={{ borderBottom: '1px solid #f1f5f9', background: 'white' }}>
@@ -986,19 +1098,71 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
                                                         {call.Name || call.name || call.first_name || '-'}
                                                     </td>
                                                     <td style={{ padding: '1rem' }}>
-                                                        <span style={{
-                                                            display: 'inline-flex', alignItems: 'center', gap: '6px',
-                                                            padding: '4px 10px', borderRadius: '20px', fontSize: '0.75rem', fontWeight: '600',
-                                                            background: isSuccess ? '#dcfce7' : isFailure ? '#fee2e2' : '#fef9c3',
-                                                            color: isSuccess ? '#166534' : isFailure ? '#991b1b' : '#854d0e',
-                                                            border: `1px solid ${isSuccess ? '#bbf7d0' : isFailure ? '#fecaca' : '#fde68a'}`
-                                                        }}>
-                                                            {isSuccess ? <CheckCircle size={12} /> : <AlertCircle size={12} />}
-                                                            {status.toUpperCase()}
-                                                        </span>
-                                                    </td>
-                                                    <td style={{ padding: '1rem', fontSize: '0.85rem', color: '#64748b' }}>
-                                                        {call.duration || call.conversation_duration || '0'}s
+                                                        {(() => {
+                                                            let badgeText, badgeColor, badgeBg, badgeBorder, icon;
+                                                            if (isSuccess) {
+                                                                badgeText = 'COMPLETED'; badgeColor = '#166534'; badgeBg = '#dcfce7'; badgeBorder = '#bbf7d0';
+                                                                icon = <CheckCircle size={12} />;
+                                                            } else if (isFailure) {
+                                                                badgeText = attemptsDone > 1 ? `FAILED (${attemptsDone}× tried)` : 'FAILED';
+                                                                badgeColor = '#991b1b'; badgeBg = '#fee2e2'; badgeBorder = '#fecaca';
+                                                                icon = <AlertCircle size={12} />;
+                                                            } else if (isRetrying) {
+                                                                const retryLabel = totalRetries ? `RETRY ${attemptsDone}/${totalRetries}` : 'RETRYING';
+                                                                let timeHint = '';
+                                                                if (call.retry_after) {
+                                                                    const minsLeft = Math.max(0, Math.round((new Date(call.retry_after) - Date.now()) / 60000));
+                                                                    timeHint = minsLeft > 0 ? ` • ${minsLeft}m` : ' • soon';
+                                                                }
+                                                                badgeText = retryLabel + timeHint;
+                                                                badgeColor = '#c2410c'; badgeBg = '#fff7ed'; badgeBorder = '#fed7aa';
+                                                                icon = <RefreshCw size={12} />;
+                                                            } else if (isPending) {
+                                                                const isCampaignRunning = campaignStatus === 'in-progress' || campaignStatus === 'inprogress' || campaignStatus === 'created' || campaignStatus === 'scheduled';
+                                                                const isCampaignPaused = campaignStatus === 'paused';
+                                                                const isCampaignDone = campaignStatus === 'completed' || campaignStatus === 'failed';
+                                                                if (isCampaignRunning) {
+                                                                    badgeText = 'WAITING'; badgeColor = '#475569'; badgeBg = '#f1f5f9'; badgeBorder = '#cbd5e1';
+                                                                    icon = <Clock size={12} />;
+                                                                } else if (isCampaignPaused) {
+                                                                    badgeText = 'ON HOLD'; badgeColor = '#92400e'; badgeBg = '#fffbeb'; badgeBorder = '#fde68a';
+                                                                    icon = <Pause size={12} />;
+                                                                } else if (isCampaignDone) {
+                                                                    badgeText = 'NOT REACHED'; badgeColor = '#991b1b'; badgeBg = '#fef2f2'; badgeBorder = '#fecaca';
+                                                                    icon = <AlertCircle size={12} />;
+                                                                } else {
+                                                                    badgeText = 'QUEUED'; badgeColor = '#475569'; badgeBg = '#f1f5f9'; badgeBorder = '#cbd5e1';
+                                                                    icon = <Clock size={12} />;
+                                                                }
+                                                            } else {
+                                                                badgeText = status.toUpperCase(); badgeColor = '#854d0e'; badgeBg = '#fef9c3'; badgeBorder = '#fde68a';
+                                                                icon = <AlertCircle size={12} />;
+                                                            }
+                                                            return (
+                                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                                                                    <span style={{
+                                                                        display: 'inline-flex', alignItems: 'center', gap: '6px',
+                                                                        padding: '4px 10px', borderRadius: '20px', fontSize: '0.75rem', fontWeight: '600',
+                                                                        background: badgeBg, color: badgeColor, border: `1px solid ${badgeBorder}`, width: 'fit-content'
+                                                                    }}>{icon}{badgeText}</span>
+                                                                    {(isRetrying || (isFailure && attemptsDone > 0)) && (
+                                                                        <span style={{ fontSize: '0.7rem', color: '#94a3b8', paddingLeft: '2px' }}>
+                                                                            {attemptsDone} attempt{attemptsDone !== 1 ? 's' : ''} made
+                                                                        </span>
+                                                                    )}
+                                                                    {isPending && (() => {
+                                                                        const isCampaignRunning = campaignStatus === 'in-progress' || campaignStatus === 'inprogress' || campaignStatus === 'created' || campaignStatus === 'scheduled';
+                                                                        const isCampaignPaused = campaignStatus === 'paused';
+                                                                        const isCampaignDone = campaignStatus === 'completed' || campaignStatus === 'failed';
+                                                                        const hint = isCampaignRunning ? 'In queue — will be called shortly'
+                                                                            : isCampaignPaused ? 'Campaign paused before this call'
+                                                                            : isCampaignDone ? 'Campaign ended before this call'
+                                                                            : null;
+                                                                        return hint ? <span style={{ fontSize: '0.7rem', color: '#94a3b8', paddingLeft: '2px' }}>{hint}</span> : null;
+                                                                    })()}
+                                                                </div>
+                                                            );
+                                                        })()}
                                                     </td>
                                                     <td style={{ padding: '1rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
                                                         {isSuccess && onNavigateToSession && (

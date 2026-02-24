@@ -1,9 +1,12 @@
 # Logs
-ngo-logs-2026-02-05-12-00-28.txt
+logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Raw log dumps
+*-agent-logs-*.txt
 
 # Environment variables - NEVER COMMIT!
 .env
@@ -40,6 +43,18 @@ Thumbs.db
 *.sqlite
 *.db
 
+# Temporary/diagnostic files
+diag.js
+*-output.txt
+*-output.log
 
+<<<<<<< HEAD
 campaign_contacts_sample.csv
 new_logs_fetch_from_postgre.md
+=======
+# PDFs (documentation)
+*.pdf
+
+# Uploads (user-generated)
+uploads/
+>>>>>>> 1e7af8121ad39c30b9ba7f45d94d0ab9cfbbb2cd

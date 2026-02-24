@@ -1,7 +1,7 @@
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { LogOut, Users, Lock } from 'lucide-react';
+import { LogOut, Users, Lock, Settings } from 'lucide-react';
 
 export default function Header() {
   const { user, logout, isAdmin } = useAuth();
@@ -133,6 +133,14 @@ export default function Header() {
                     >
                       Permissions
                     </button>
+                    {(user?.role === 'super_admin' || user?.isMaster) && (
+                      <button
+                        onClick={() => navigate('/admin/settings')}
+                        className={`nav-link-btn ${location.pathname === '/admin/settings' ? 'active' : ''}`}
+                      >
+                        Settings
+                      </button>
+                    )}
 
                     <button
                       onClick={() => navigate('/admin/billing')}

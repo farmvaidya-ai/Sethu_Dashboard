@@ -28,6 +28,8 @@ const { generateSummary } = require(path.join(__dirname, '../src/services/summar
 const SYNC_START_DATE = new Date('2026-01-01T00:00:00Z');
 const POLL_INTERVAL_MS = 2000; // Run every 2 seconds (faster sync for production)
 const MAX_PARALLEL_AGENTS = 3; // Number of "Virtual Workers" for agent syncing
+const MAX_SESSIONS_PER_AGENT_PER_CYCLE = 10; // Fair distribution: no one agent hogs the queue
+const MAX_SESSIONS_PER_CYCLE = 30; // Total cap to keep cycles short (~1-2 min)
 
 // Sessions that ENDED after this time will get auto-generated summaries
 // Set to script start time so only new sessions get summaries, not historical ones
@@ -330,245 +332,310 @@ async function syncSessions(client, agents) {
 }
 
 async function syncConversations(client, agents) {
-    logger.info(`🚀 Starting parallel conversation sync for ${agents.length} agents...`);
-    let totalSyncedGlobal = 0;
+    logger.info(`🚀 Starting PER-SESSION conversation sync for ${agents.length} agents...`);
 
-    const processAgentConversations = async (agent) => {
-        let agentSyncedCount = 0;
+    // ============ STEP 1: GATHER ALL SESSIONS NEEDING SYNC (across ALL agents at once) ============
+    const allSessionsToSync = [];
+    const agentMap = new Map(agents.map(a => [a.id, a]));
+
+    // Query all agents in parallel to find sessions needing sync
+    await Promise.all(agents.map(async (agent) => {
         try {
-            logger.info(` [Worker] Fetching logs for Agent: ${agent.name}`);
-            const latestConversation = await Conversation.findOne({
-                where: { agent_id: agent.id },
-                order: [['last_message_at', 'DESC']]
+            const sessionsNeedingSync = await sequelize.query(`
+                SELECT s.session_id, s.agent_id, s.agent_name, s.started_at, s.ended_at,
+                       s.duration_seconds, s.status,
+                       c.total_turns, c.last_synced AS conv_last_synced
+                FROM "${getTableName('Sessions')}" s
+                LEFT JOIN "${getTableName('Conversations')}" c ON s.session_id = c.session_id
+                WHERE s.agent_id = :agentId
+                AND s.started_at >= :startDate
+                AND (
+                    -- 1. No conversation data at all (first-time sync)
+                    c.session_id IS NULL
+                    -- 2. Session ended AFTER we last synced its conversation (one-time catch-up)
+                    OR (s.ended_at IS NOT NULL AND c.last_synced < s.ended_at)
+                    -- 3. Session still active — re-sync but only every 30 seconds
+                    OR (s.ended_at IS NULL AND (c.last_synced IS NULL OR c.last_synced < NOW() - INTERVAL '30 seconds'))
+                    -- 4. Low density (incomplete but has SOME turns) — only retry every 30 minutes
+                    OR (c.total_turns > 0
+                        AND s.duration_seconds > 60 
+                        AND c.total_turns < GREATEST(s.duration_seconds / 60, 3) 
+                        AND (c.last_synced IS NULL OR c.last_synced < NOW() - INTERVAL '30 minutes'))
+                )
+                ORDER BY 
+                    CASE WHEN c.session_id IS NULL THEN 0 ELSE 1 END,  -- Never-synced first
+                    CASE WHEN s.ended_at IS NULL THEN 0 ELSE 1 END,    -- Active sessions next
+                    s.started_at DESC
+                LIMIT :maxPerAgent
+            `, {
+                replacements: { agentId: agent.id, startDate: SYNC_START_DATE, maxPerAgent: MAX_SESSIONS_PER_AGENT_PER_CYCLE },
+                type: sequelize.QueryTypes.SELECT
             });
 
-            // If we have synced data, look back 5 mins to catch overlapping messages
-            const stopThreshold = latestConversation
-                ? new Date(latestConversation.last_message_at.getTime() - (5 * 60 * 1000))
-                : SYNC_START_DATE;
-
-            const initialResponse = await client.getAgentLogs(agent.name, null, 1, 100);
-            const initialLogs = initialResponse.data || [];
-            if (initialLogs.length === 0) return 0;
-
-            const isAscending = initialLogs.length > 1 &&
-                new Date(initialLogs[0].timestamp) < new Date(initialLogs[initialLogs.length - 1].timestamp);
-
-            const totalLogs = initialResponse.total || initialLogs.length;
-            const totalPages = Math.ceil(totalLogs / 100);
-
-            let page = isAscending ? totalPages : 1;
-            let stopFetchingForAgent = false;
-            const sessionLogs = new Map();
-
-            while (page >= 1 && !stopFetchingForAgent) {
-                try {
-                    const response = (page === 1) ? initialResponse : await client.getAgentLogs(agent.name, null, page, 100);
-                    const logs = response.data || [];
-                    if (logs.length === 0) break;
-
-                    const logsToProcess = isAscending ? [...logs].reverse() : logs;
-                    for (const log of logsToProcess) {
-                        const logTime = new Date(log.timestamp);
-                        if (logTime < stopThreshold) {
-                            stopFetchingForAgent = true;
-                            break;
-                        }
-                        const msg = log.log || '';
-                        const sessionId = extractSessionId(msg);
-                        if (!sessionId) continue;
-                        if (!sessionLogs.has(sessionId)) sessionLogs.set(sessionId, []);
-                        sessionLogs.get(sessionId).push({ log: msg, timestamp: log.timestamp });
-
-                        // Telephony metadata extraction
-                        const telephony = require('../src/services/pipecat_normalization').extractTelephonyMetadata(msg);
-                        if (telephony) {
-                            try {
-                                const currentSession = await Session.findByPk(sessionId);
-                                if (currentSession) {
-                                    const newMetadata = { ...(currentSession.metadata || {}), telephony };
-                                    await Session.update({ metadata: newMetadata }, { where: { session_id: sessionId } });
-                                }
-                            } catch (e) { }
-                        }
-                    }
-
-                    if (isAscending) page--; else page++;
-                    if (page === 0) break;
-                    if (!isAscending && logs.length < 100) break;
-                    await client.delay(50);
-                } catch (fetchError) {
-                    logger.error(`⚠️ Stopping log fetch for ${agent.name} at page ${page}: ${fetchError.message}`);
-                    break;
-                }
+            if (sessionsNeedingSync.length > 0) {
+                logger.info(` [Queue] ${sessionsNeedingSync.length} sessions need sync for ${agent.name}`);
+                allSessionsToSync.push(...sessionsNeedingSync);
+            } else {
+                logger.debug(` [Queue] No sessions need sync for ${agent.name}`);
             }
+        } catch (err) {
+            logger.error(` ❌ Error querying sessions for ${agent.name}: ${err.message}`);
+        }
+    }));
 
-            // Process collected sessions
-            for (const [sessionId, logs] of sessionLogs.entries()) {
-                try {
-                    const turns = normalizeLogs(logs);
+    if (allSessionsToSync.length === 0) {
+        logger.debug('No sessions need conversation sync across any agent.');
+        return;
+    }
 
-                    // ============ ENHANCED ERROR DETECTION ============
-                    if (!turns || turns.length === 0) {
-                        // Log this for debugging - especially for specific agents
-                        logger.warn(`⚠️ No turns extracted for session ${sessionId} (${agent.name}). Log count: ${logs.length}`);
+    // ============ FAIR DISTRIBUTION: Interleave sessions from different agents ============
+    // Group by agent, then round-robin pick so no single agent dominates the queue
+    const byAgent = new Map();
+    for (const s of allSessionsToSync) {
+        if (!byAgent.has(s.agent_name)) byAgent.set(s.agent_name, []);
+        byAgent.get(s.agent_name).push(s);
+    }
+    const interleavedQueue = [];
+    const agentQueues = [...byAgent.values()];
+    let anyLeft = true;
+    let roundIdx = 0;
+    while (anyLeft && interleavedQueue.length < MAX_SESSIONS_PER_CYCLE) {
+        anyLeft = false;
+        for (const q of agentQueues) {
+            if (roundIdx < q.length) {
+                interleavedQueue.push(q[roundIdx]);
+                anyLeft = true;
+                if (interleavedQueue.length >= MAX_SESSIONS_PER_CYCLE) break;
+            }
+        }
+        roundIdx++;
+    }
 
-                        // Sample the first few logs to debug parsing issues
-                        if (logs.length > 0 && agent.name.toLowerCase().includes('ngo')) {
-                            const sample = logs.slice(0, 3).map(l => {
-                                const msg = typeof l === 'string' ? l : (l.log || l.message || '');
-                                return msg.substring(0, 200); // First 200 chars
-                            });
-                            logger.warn(`📋 Sample logs for ${agent.name}: ${JSON.stringify(sample)}`);
-                        }
-                        continue;
-                    }
+    const agentBreakdown = [...byAgent.entries()].map(([name, sessions]) => `${name}(${sessions.length})`).join(', ');
+    logger.info(`📋 Work queue: ${interleavedQueue.length}/${allSessionsToSync.length} sessions from ${byAgent.size} agents [${agentBreakdown}]`);
 
-                    // Check if turns have assistant messages
-                    const hasAssistantMessages = turns.some(t => t.assistant_message);
-                    if (!hasAssistantMessages && turns.length > 0) {
-                        logger.warn(`⚠️ Session ${sessionId} (${agent.name}) has ${turns.length} turns but NO assistant messages!`);
-                    }
+    // Replace allSessionsToSync with fair interleaved queue
+    const workQueue = interleavedQueue;
 
-                    const time = turns[turns.length - 1].timestamp || new Date();
-                    const existing = await Conversation.findByPk(sessionId);
+    // ============ STEP 2: PROCESS SESSIONS WITH CONCURRENT WORKERS ============
+    // Shared work queue — workers pull from it regardless of agent, so no single agent blocks others
+    const CONCURRENT_WORKERS = MAX_PARALLEL_AGENTS; // 3 concurrent session processors
+    let totalSyncedGlobal = 0;
+    let queueIndex = 0;
 
-                    // ============ DATA PROTECTION LAYER (Fixes Flickering) ============
-                    // 1. Safety Check: If we fetched FEWER turns than we already have, something is wrong.
-                    // Don't overwrite good data with truncated data.
-                    if (existing && existing.turns && turns.length < existing.turns.length) {
-                        logger.warn(`📉 Turn count shrinkage detected for ${sessionId} (${existing.turns.length} -> ${turns.length}). Skipping update to protect data.`);
-                        continue;
-                    }
+    const processOneSession = async (session) => {
+        const sessionId = session.session_id;
+        const agentName = session.agent_name;
+        const agent = agentMap.get(session.agent_id);
+        if (!agent) return false;
 
-                    // 2. Intelligent Merge: If new data has "holes" (missing text) that we already have, fill them.
-                    if (existing && existing.turns && turns.length > 0) {
-                        let preservedCount = 0;
-                        turns.forEach((newTurn, index) => {
-                            if (index < existing.turns.length) {
-                                const oldTurn = existing.turns[index];
+        try {
+            // Fetch ALL logs for this specific session using query param
+            const allSessionLogs = await client.getAllLogsForSessionById(agentName, sessionId);
 
-                                // Protect Assistant Message (The main issue)
-                                if (!newTurn.assistant_message && oldTurn.assistant_message) {
-                                    newTurn.assistant_message = oldTurn.assistant_message;
-                                    preservedCount++;
-                                }
-                                // Protect User Message - Missing or Truncated
-                                if (!newTurn.user_message && oldTurn.user_message) {
-                                    newTurn.user_message = oldTurn.user_message;
-                                    preservedCount++;
-                                } else if (newTurn.user_message && oldTurn.user_message) {
-                                    // Anti-Truncation Protection:
-                                    // If old message is significantly longer than new message, it means we probably have a truncation bug in the new parse.
-                                    // "Okay I" (6 chars) vs "Okay I'm a student..." (20+ chars)
-                                    if (oldTurn.user_message.length > newTurn.user_message.length + 5) {
-                                        newTurn.user_message = oldTurn.user_message;
-                                        preservedCount++;
-                                        logger.info(`🛡️ Protected truncated user message for turn ${newTurn.turn_id} in ${sessionId}. Kept ${oldTurn.user_message.length} chars vs new ${newTurn.user_message.length}`);
-                                    }
-                                }
-                            }
-                        });
-
-                        if (preservedCount > 0) {
-                            if (agent.name.toLowerCase().includes('ngo')) {
-                                logger.info(`🛡️ Protected ${preservedCount} messages for ${sessionId} (NGO Agent)`);
-                            } else {
-                                logger.debug(`🛡️ Protected ${preservedCount} messages for ${sessionId}`);
-                            }
-                        }
-                    }
-                    // ============ END PROTECTION ============
-
-                    const parentSession = await Session.findByPk(sessionId);
-
-                    let isContentMissing = false;
-                    if (existing && existing.turns.length === turns.length) {
-                        const lastTurn = turns[turns.length - 1];
-                        const existingLastTurn = existing.turns[existing.turns.length - 1];
-                        // Logic updated: Only flag missing if NEW has it and OLD doesn't
-                        if (lastTurn.assistant_message && (!existingLastTurn || !existingLastTurn.assistant_message)) {
-                            isContentMissing = true;
-                            logger.info(`🔄 Updating session ${sessionId} - new content found`);
-                        }
-                    }
-
-                    const needsSummary = existing && !existing.summary && parentSession?.ended_at;
-                    if (existing && existing.turns.length === turns.length && existing.last_message_at >= time && !isContentMissing && !needsSummary) {
-                        continue;
-                    }
-
-                    if (!parentSession) continue;
-
-                    let summary = null;
-                    const isRecentSession = new Date(parentSession.started_at) >= new Date('2026-01-28T00:00:00Z');
-                    if (parentSession.ended_at && turns.length > 0 && !existing?.summary && isRecentSession) {
-                        summary = await generateSummary(turns);
-                    } else if (existing?.summary) {
-                        summary = existing.summary;
-                    }
-
+            if (!allSessionLogs || allSessionLogs.length === 0) {
+                logger.debug(` No logs found for session ${sessionId}`);
+                // Mark as synced to prevent infinite retry
+                const existingConv = await Conversation.findByPk(sessionId);
+                if (!existingConv) {
                     await Conversation.upsert({
                         session_id: sessionId,
                         agent_id: agent.id,
-                        agent_name: agent.name,
-                        turns: turns,
-                        total_turns: turns.length,
-                        first_message_at: turns[0]?.timestamp || time,
-                        last_message_at: time,
-                        summary: summary,
+                        agent_name: agentName,
+                        turns: [],
+                        total_turns: 0,
                         last_synced: new Date()
                     });
+                } else {
+                    await Conversation.update({ last_synced: new Date() }, { where: { session_id: sessionId } });
+                }
+                return false;
+            }
 
-                    await Session.update({ conversation_count: turns.length }, { where: { session_id: sessionId } });
-                    agentSyncedCount++;
-                } catch (e) {
-                    logger.error(`❌ Error processing session ${sessionId} (${agent.name}): ${e.message}`);
-                    logger.error(`Stack: ${e.stack}`);
+            // Extract telephony metadata from logs
+            for (const log of allSessionLogs) {
+                const msg = log.log || '';
+                const telephony = require('../src/services/pipecat_normalization').extractTelephonyMetadata(msg);
+                if (telephony) {
+                    try {
+                        const currentSession = await Session.findByPk(sessionId);
+                        if (currentSession) {
+                            const newMetadata = { ...(currentSession.metadata || {}), telephony };
+                            await Session.update({ metadata: newMetadata }, { where: { session_id: sessionId } });
+                        }
+                    } catch (e) { }
+                    break; // Only need first telephony metadata
                 }
             }
-        } catch (err) {
-            logger.error(` ❌ [Worker] Error syncing conversations for ${agent.name}: ${err.message}`);
+
+            // Normalize logs into conversation turns (pass sessionId for proper attribution)
+            const logEntries = allSessionLogs.map(l => ({ log: l.log || '', timestamp: l.timestamp }));
+            const turns = normalizeLogs(logEntries, sessionId);
+
+            // ============ ENHANCED ERROR DETECTION ============
+            if (!turns || turns.length === 0) {
+                logger.warn(`⚠️ No turns extracted for session ${sessionId} (${agentName}). Log count: ${allSessionLogs.length}`);
+                // Still mark as synced so it doesn't retry every cycle
+                const existingConv = await Conversation.findByPk(sessionId);
+                if (!existingConv) {
+                    await Conversation.upsert({
+                        session_id: sessionId,
+                        agent_id: agentMap.get(session.agent_id)?.id || session.agent_id,
+                        agent_name: agentName,
+                        turns: [],
+                        total_turns: 0,
+                        last_synced: new Date()
+                    });
+                } else {
+                    await Conversation.update({ last_synced: new Date() }, { where: { session_id: sessionId } });
+                }
+                return false;
+            }
+
+            // Check if turns have assistant messages
+            const hasAssistantMessages = turns.some(t => t.assistant_message);
+            if (!hasAssistantMessages && turns.length > 0) {
+                logger.warn(`⚠️ Session ${sessionId} (${agentName}) has ${turns.length} turns but NO assistant messages!`);
+            }
+
+            const time = turns[turns.length - 1].timestamp || new Date();
+            const existing = await Conversation.findByPk(sessionId);
+
+            // ============ DATA PROTECTION LAYER ============
+            // 1. Safety Check: Don't overwrite good data with truncated data
+            if (existing && existing.turns && turns.length < existing.turns.length) {
+                const existingBotCount = existing.turns.filter(t => t.assistant_message).length;
+                const newBotCount = turns.filter(t => t.assistant_message).length;
+                if (newBotCount <= existingBotCount) {
+                    logger.warn(`📉 Turn count shrinkage for ${sessionId} (${existing.turns.length} -> ${turns.length}). Skipping.`);
+                    return false;
+                }
+                logger.info(`📊 Replacing ${sessionId}: fewer turns (${existing.turns.length}→${turns.length}) but better quality`);
+            }
+
+            // 2. Intelligent Merge: Fill holes in new data from existing data
+            if (existing && existing.turns && turns.length > 0) {
+                let preservedCount = 0;
+                turns.forEach((newTurn, index) => {
+                    if (index < existing.turns.length) {
+                        const oldTurn = existing.turns[index];
+                        if (!newTurn.assistant_message && oldTurn.assistant_message) {
+                            newTurn.assistant_message = oldTurn.assistant_message;
+                            preservedCount++;
+                        }
+                        if (!newTurn.user_message && oldTurn.user_message) {
+                            newTurn.user_message = oldTurn.user_message;
+                        }
+                    }
+                });
+                if (preservedCount > 0) {
+                    logger.debug(`🛡️ Protected ${preservedCount} messages for ${sessionId}`);
+                }
+            }
+            // ============ END PROTECTION ============
+
+            const parentSession = await Session.findByPk(sessionId);
+
+            let isContentMissing = false;
+            if (existing && existing.turns.length === turns.length) {
+                const lastTurn = turns[turns.length - 1];
+                const existingLastTurn = existing.turns[existing.turns.length - 1];
+                if (lastTurn.assistant_message && (!existingLastTurn || !existingLastTurn.assistant_message)) {
+                    isContentMissing = true;
+                }
+            }
+
+            const needsSummary = existing && !existing.summary && parentSession?.ended_at;
+            if (existing && existing.turns.length === turns.length && existing.last_message_at >= time && !isContentMissing && !needsSummary) {
+                // Still update last_synced to prevent re-queuing
+                await Conversation.update({ last_synced: new Date() }, { where: { session_id: sessionId } });
+                return false;
+            }
+
+            if (!parentSession) {
+                // Update last_synced even when parentSession is missing
+                if (existing) {
+                    await Conversation.update({ last_synced: new Date() }, { where: { session_id: sessionId } });
+                }
+                return false;
+            }
+
+            let summary = null;
+            const isRecentSession = new Date(parentSession.started_at) >= new Date('2026-01-28T00:00:00Z');
+            if (parentSession.ended_at && turns.length > 0 && !existing?.summary && isRecentSession) {
+                summary = await generateSummary(turns);
+            } else if (existing?.summary) {
+                summary = existing.summary;
+            }
+
+            await Conversation.upsert({
+                session_id: sessionId,
+                agent_id: agent.id,
+                agent_name: agentName,
+                turns: turns,
+                total_turns: turns.length,
+                first_message_at: turns[0]?.timestamp || time,
+                last_message_at: time,
+                summary: summary,
+                last_synced: new Date()
+            });
+
+            await Session.update({ conversation_count: turns.length }, { where: { session_id: sessionId } });
+            logger.info(` ✅ Synced ${sessionId} (${agentName}): ${turns.length} turns from ${allSessionLogs.length} logs`);
+            return true;
+
+        } catch (e) {
+            if (e.response?.status === 429) {
+                logger.warn(`⏳ Rate limited on ${sessionId}, waiting 5s...`);
+                await client.delay(5000);
+            } else {
+                logger.error(`❌ Error processing session ${sessionId} (${agentName}): ${e.message}`);
+            }
+            return false;
         }
-        return agentSyncedCount;
     };
 
-    // Use pooling for parallel conversation sync
-    for (let i = 0; i < agents.length; i += MAX_PARALLEL_AGENTS) {
-        const chunk = agents.slice(i, i + MAX_PARALLEL_AGENTS);
-        const results = await Promise.all(chunk.map(agent => processAgentConversations(agent)));
-        totalSyncedGlobal += results.reduce((a, b) => a + b, 0);
+    // Worker function: pulls sessions from shared queue until empty
+    const worker = async (workerId) => {
+        let workerSynced = 0;
+        while (queueIndex < workQueue.length) {
+            const idx = queueIndex++;
+            if (idx >= workQueue.length) break;
+            const session = workQueue[idx];
+            const success = await processOneSession(session);
+            if (success) workerSynced++;
+            // Small delay between sessions to avoid rate limiting
+            await client.delay(200);
+        }
+        return workerSynced;
+    };
+
+    // Launch concurrent workers
+    const workerPromises = [];
+    for (let i = 0; i < CONCURRENT_WORKERS; i++) {
+        workerPromises.push(worker(i));
     }
+    const results = await Promise.all(workerPromises);
+    totalSyncedGlobal = results.reduce((sum, c) => sum + c, 0);
 
     if (totalSyncedGlobal > 0) {
-        logger.info(`✅ [Multi-Worker] Total Synced across all agents: ${totalSyncedGlobal}`);
+        logger.info(`✅ Total Synced across all agents: ${totalSyncedGlobal}`);
     }
 }
 
+// JS-level flag to prevent re-entry (single Node.js process, sequential loop)
+let isSyncRunning = false;
+
 async function runSyncCycle() {
+    if (isSyncRunning) {
+        logger.info('⏭️ Previous cycle still running, skipping');
+        return;
+    }
+    isSyncRunning = true;
+
     logger.info(`🔄 Sync Cycle Started at ${new Date().toISOString()}`);
 
-    // ============ DISTRIBUTED LOCK (Prevents multiple instances from conflicting) ============
-    // Use PostgreSQL advisory lock to ensure only ONE sync instance runs at a time
-    const LOCK_ID = 987654321; // Unique lock ID for this sync process
-    let lockAcquired = false;
-
     try {
-        // Try to acquire advisory lock (non-blocking)
-        const lockResult = await sequelize.query(
-            `SELECT pg_try_advisory_lock(${LOCK_ID}) as acquired`,
-            { type: sequelize.QueryTypes.SELECT }
-        );
-
-        lockAcquired = lockResult[0]?.acquired;
-
-        if (!lockAcquired) {
-            logger.warn('⏭️ Skipping sync cycle - another instance is already running');
-            return; // Exit early, let the other instance handle it
-        }
-
-        logger.info('🔒 Lock acquired (v2.1 Protected) - starting sync...');
-
         const client = new PipecatClient();
         const agents = await syncAgents(client);
         // Start incremental sync
@@ -578,15 +645,7 @@ async function runSyncCycle() {
     } catch (e) {
         logger.error('Sync Cycle Failed:', e);
     } finally {
-        // Always release the lock
-        if (lockAcquired) {
-            try {
-                await sequelize.query(`SELECT pg_advisory_unlock(${LOCK_ID})`);
-                logger.info('🔓 Lock released');
-            } catch (unlockErr) {
-                logger.error('Failed to release lock:', unlockErr.message);
-            }
-        }
+        isSyncRunning = false;
     }
 
     logger.info(`🏁 Sync Cycle Finished. Next run in ${POLL_INTERVAL_MS / 1000}s`);
@@ -636,19 +695,15 @@ async function main() {
     }
 }
 
-// Cleanup handlers to release locks on exit
-const LOCK_ID = 987654321; // Same lock ID used in runSyncCycle
-
+// Cleanup handlers
 async function cleanup() {
     logger.info('🛑 Stopping sync service...');
     try {
-        // Release any held advisory locks
-        await sequelize.query(`SELECT pg_advisory_unlock_all()`);
-        logger.info('🔓 All locks released');
+        await sequelize.close();
+        logger.info('🔓 Database connections closed');
     } catch (e) {
-        logger.error('Lock cleanup error:', e.message);
+        logger.error('Cleanup error:', e.message);
     }
-    await sequelize.close();
     process.exit(0);
 }
 
