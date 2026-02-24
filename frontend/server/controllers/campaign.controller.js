@@ -259,103 +259,72 @@ const processCampaignCalls = async (campaignId, contacts, callerId, appId, callI
 
     console.log(`📞 [Campaign ${campaignId}] Starting slot-based progressive calls: ${contacts.length} contacts, ${concurrentLines} max lines, ${callIntervalSec}s between calls`);
 
-    // Process a single contact (acquire line, call, wait for completion, release line)
-    const processContact = async (contact, contactIndex) => {
-        let lastErr = null;
-        let success = false;
+    // Make a single call attempt (no retry loop — caller handles scheduling retries)
+    // Returns: { success: bool, shouldRetry: bool, error?: string }
+    const processOneAttempt = async (contact, contactIndex, attempt) => {
+        try {
+            const result = await makeDirectCall(contact.number, contact.first_name, callerId, appId);
+            const callSid = result?.Call?.Sid;
+            console.log(`📲 [Campaign ${campaignId}] Call ${contactIndex}/${contacts.length} to ${contact.number} initiated (SID: ${callSid}, attempt ${attempt + 1})`);
 
-        for (let attempt = 0; attempt <= retriesCount; attempt++) {
-            if (signal.aborted || signal.abort) break;
-            if (attempt > 0) {
-                console.log(`🔄 [Campaign ${campaignId}] Retry ${attempt}/${retriesCount} for ${contact.number} in ${retryIntervalMin} min...`);
-                await sleep(retryIntervalMin * 60 * 1000);
-                if (signal.aborted || signal.abort) break;
-            }
+            if (callSid) {
+                const finalStatus = await waitForCallEnd(callSid, signal);
+                console.log(`📞 [Campaign ${campaignId}] Call ${contactIndex}/${contacts.length} to ${contact.number} ended: ${finalStatus.status} (${finalStatus.duration}s)`);
 
-            try {
-                const result = await makeDirectCall(contact.number, contact.first_name, callerId, appId);
-                const callSid = result?.Call?.Sid;
-                console.log(`📲 [Campaign ${campaignId}] Call ${contactIndex}/${contacts.length} to ${contact.number} initiated (SID: ${callSid}, attempt ${attempt + 1})`);
-
-                if (callSid) {
-                    // Wait for this call to actually finish before releasing the line
-                    const finalStatus = await waitForCallEnd(callSid, signal);
-                    console.log(`📞 [Campaign ${campaignId}] Call ${contactIndex}/${contacts.length} to ${contact.number} ended: ${finalStatus.status} (${finalStatus.duration}s)`);
-
-                    const isSuccess = finalStatus.status === 'completed';
-                    if (isSuccess || finalStatus.status === 'timeout') {
-                        callResults.push({
-                            number: contact.number,
-                            name: contact.first_name,
-                            status: 'completed',
-                            attempt: attempt + 1,
-                            call_sid: callSid,
-                            duration: finalStatus.duration,
-                            exotel_status: finalStatus.status,
-                            timestamp: new Date().toISOString()
-                        });
-                        completedCalls++;
-                        success = true;
-                        break;
-                    } else if (TERMINAL_CALL_STATUSES.has(finalStatus.status) && finalStatus.status !== 'completed') {
-                        // Terminal but not success (busy, no-answer, failed) — may retry
-                        lastErr = new Error(`Call ended with status: ${finalStatus.status}`);
-                        console.warn(`⚠️ [Campaign ${campaignId}] Call ${contactIndex} to ${contact.number} - ${finalStatus.status} (attempt ${attempt + 1})`);
-                        continue; // will retry if attempts remain
-                    }
-                } else {
-                    // No SID returned but API didn't throw — mark as completed (fire-and-forget)
-                    console.log(`✅ [Campaign ${campaignId}] Call ${contactIndex}/${contacts.length} to ${contact.number} - initiated (no SID, attempt ${attempt + 1})`);
+                if (finalStatus.status === 'completed' || finalStatus.status === 'timeout') {
                     callResults.push({
                         number: contact.number,
                         name: contact.first_name,
                         status: 'completed',
                         attempt: attempt + 1,
-                        call_sid: null,
+                        call_sid: callSid,
+                        duration: finalStatus.duration,
+                        exotel_status: finalStatus.status,
                         timestamp: new Date().toISOString()
                     });
                     completedCalls++;
-                    success = true;
-                    break;
+                    return { success: true, shouldRetry: false };
+                } else {
+                    // Not connected (busy, no-answer, failed, canceled) — line released immediately
+                    console.warn(`⚠️ [Campaign ${campaignId}] Call ${contactIndex} to ${contact.number} - ${finalStatus.status} (attempt ${attempt + 1})`);
+                    return { success: false, shouldRetry: attempt < retriesCount };
                 }
-            } catch (callErr) {
-                lastErr = callErr;
-                const errMsg = callErr.response?.data?.RestException?.Message || callErr.message;
-                console.error(`❌ [Campaign ${campaignId}] Call ${contactIndex}/${contacts.length} to ${contact.number} - FAILED (attempt ${attempt + 1}): ${errMsg}`);
+            } else {
+                // No SID — treat as initiated (fire-and-forget success)
+                callResults.push({
+                    number: contact.number,
+                    name: contact.first_name,
+                    status: 'completed',
+                    attempt: attempt + 1,
+                    call_sid: null,
+                    timestamp: new Date().toISOString()
+                });
+                completedCalls++;
+                return { success: true, shouldRetry: false };
             }
-        }
-
-        if (!success) {
-            failedCalls++;
-            callResults.push({
-                number: contact.number,
-                name: contact.first_name,
-                status: 'failed',
-                attempt: retriesCount + 1,
-                error: lastErr?.response?.data?.RestException?.Message || lastErr?.message || 'Unknown error',
-                timestamp: new Date().toISOString()
-            });
+        } catch (callErr) {
+            const errMsg = callErr.response?.data?.RestException?.Message || callErr.message;
+            console.error(`❌ [Campaign ${campaignId}] Call ${contactIndex}/${contacts.length} to ${contact.number} - FAILED (attempt ${attempt + 1}): ${errMsg}`);
+            return { success: false, shouldRetry: attempt < retriesCount, error: errMsg };
         }
     };
 
     try {
-        // Queue contacts one by one, respecting concurrent line limit
+        // pendingQueue: fresh contacts + matured retries ready to call
+        // retryHold:   failed contacts waiting for their retry interval to elapse
+        const pendingQueue = contacts.map((contact, i) => ({ contact, contactIndex: i + 1, attempt: 0 }));
+        const retryHold = []; // { contact, contactIndex, attempt, retryAfter }
         const pendingPromises = [];
 
-        for (let i = 0; i < contacts.length; i++) {
+        console.log(`📞 [Campaign ${campaignId}] Starting: ${contacts.length} contacts, ${concurrentLines} max lines, ${callIntervalSec}s call interval, ${retriesCount} retries after ${retryIntervalMin}min`);
+
+        while (pendingQueue.length > 0 || retryHold.length > 0 || activeLines > 0) {
             if (signal.aborted || signal.abort) {
-                console.log(`⏹️ [Campaign ${campaignId}] Aborted by user at contact ${i + 1}/${contacts.length}`);
+                console.log(`⏹️ [Campaign ${campaignId}] Aborted by user`);
                 break;
             }
 
-            // Wait for a free line slot
-            while (activeLines >= concurrentLines) {
-                if (signal.aborted || signal.abort) break;
-                await sleep(2000); // Check every 2s for free line
-            }
-            if (signal.aborted || signal.abort) break;
-
-            // Daily time window check — pause and resume next day if past daily end time
+            // Daily time window check
             while (isAfterDailyEnd()) {
                 if (signal.aborted || signal.abort) break;
                 await waitUntilNextDailyStart();
@@ -363,35 +332,69 @@ const processCampaignCalls = async (campaignId, contacts, callerId, appId, callI
             }
             if (signal.aborted || signal.abort) break;
 
-            // Acquire a line and start the call
-            activeLines++;
-            const contactIndex = i + 1;
-            console.log(`🔵 [Campaign ${campaignId}] Line acquired (${activeLines}/${concurrentLines} in use) — calling contact ${contactIndex}/${contacts.length}: ${contacts[i].number}`);
+            // Move any matured retries into the pending queue
+            const now = Date.now();
+            for (let ri = retryHold.length - 1; ri >= 0; ri--) {
+                if (retryHold[ri].retryAfter <= now) {
+                    const item = retryHold.splice(ri, 1)[0];
+                    pendingQueue.push(item);
+                    console.log(`🔄 [Campaign ${campaignId}] Retry ${item.attempt}/${retriesCount} for ${item.contact.number} is now due — queued`);
+                }
+            }
 
-            const callPromise = processContact(contacts[i], contactIndex)
-                .finally(() => {
-                    activeLines--;
-                    console.log(`🟢 [Campaign ${campaignId}] Line released (${activeLines}/${concurrentLines} in use)`);
+            if (activeLines < concurrentLines && pendingQueue.length > 0) {
+                const item = pendingQueue.shift();
+                activeLines++;
+                const isRetry = item.attempt > 0;
+                if (isRetry) {
+                    console.log(`🔵 [Campaign ${campaignId}] Line acquired (${activeLines}/${concurrentLines}) — retry ${item.attempt}/${retriesCount} for ${item.contact.number}`);
+                } else {
+                    console.log(`🔵 [Campaign ${campaignId}] Line acquired (${activeLines}/${concurrentLines}) — calling ${item.contactIndex}/${contacts.length}: ${item.contact.number}`);
+                }
 
-                    // Update progress in DB after each call completes
-                    pool.query(
-                        `UPDATE "${LOCAL_CAMPAIGNS_TABLE}" SET completed_calls = $1, failed_calls = $2, call_results = $3, date_updated = NOW() WHERE id = $4`,
-                        [completedCalls, failedCalls, JSON.stringify(callResults), campaignId]
-                    ).catch(dbErr => console.warn(`⚠️ [Campaign ${campaignId}] DB update error:`, dbErr.message));
-                });
+                const callPromise = processOneAttempt(item.contact, item.contactIndex, item.attempt)
+                    .then(({ success, shouldRetry, error }) => {
+                        if (!success && shouldRetry) {
+                            // Schedule retry — do NOT hold the line slot
+                            const retryAfter = Date.now() + retryIntervalMin * 60 * 1000;
+                            console.log(`📅 [Campaign ${campaignId}] Will retry ${item.contact.number} in ${retryIntervalMin}min (attempt ${item.attempt + 1}/${retriesCount})`);
+                            retryHold.push({ ...item, attempt: item.attempt + 1, retryAfter });
+                        } else if (!success) {
+                            // All attempts exhausted
+                            failedCalls++;
+                            callResults.push({
+                                number: item.contact.number,
+                                name: item.contact.first_name,
+                                status: 'failed',
+                                attempt: item.attempt + 1,
+                                error: error || 'Unknown error',
+                                timestamp: new Date().toISOString()
+                            });
+                        }
+                    })
+                    .finally(() => {
+                        activeLines--;
+                        console.log(`🟢 [Campaign ${campaignId}] Line released (${activeLines}/${concurrentLines} in use)`);
+                        pool.query(
+                            `UPDATE "${LOCAL_CAMPAIGNS_TABLE}" SET completed_calls = $1, failed_calls = $2, call_results = $3, date_updated = NOW() WHERE id = $4`,
+                            [completedCalls, failedCalls, JSON.stringify(callResults), campaignId]
+                        ).catch(dbErr => console.warn(`⚠️ [Campaign ${campaignId}] DB update error:`, dbErr.message));
+                    });
 
-            pendingPromises.push(callPromise);
+                pendingPromises.push(callPromise);
 
-            // Rate limiting: wait callIntervalSec between initiating each call
-            // This controls CPM directly: e.g., 10s interval = 6 CPM
-            if (i + 1 < contacts.length && !signal.aborted && !signal.abort) {
-                console.log(`⏳ [Campaign ${campaignId}] Waiting ${callIntervalSec}s before initiating next call...`);
-                await sleep(callIntervalSec * 1000);
+                // Rate limit only between first-attempt calls (retries fire immediately when due)
+                if (!isRetry && (pendingQueue.some(q => q.attempt === 0) || retryHold.length > 0) && !signal.aborted && !signal.abort) {
+                    console.log(`⏳ [Campaign ${campaignId}] Waiting ${callIntervalSec}s before next call...`);
+                    await sleep(callIntervalSec * 1000);
+                }
+            } else {
+                // Lines busy or nothing ready yet — wait briefly and re-check
+                await sleep(2000);
             }
         }
 
-        // Wait for all remaining in-flight calls to finish
-        console.log(`⏳ [Campaign ${campaignId}] Waiting for ${pendingPromises.length} in-flight calls to complete...`);
+        // Wait for all in-flight calls to settle
         await Promise.allSettled(pendingPromises);
 
         const finalStatus = (signal.aborted || signal.abort) ? 'paused' : 'completed';
