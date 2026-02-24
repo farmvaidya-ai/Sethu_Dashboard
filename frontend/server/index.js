@@ -975,7 +975,6 @@ app.get('/api/stats', async (req, res) => {
     let isMaster = false;
 
     try {
-<<<<<<< HEAD
         const decoded = jwt.verify(token, JWT_SECRET);
         requesterId = decoded.userId;
         isMaster = decoded.isMaster && requesterId === 'master_root_0';
@@ -993,103 +992,6 @@ app.get('/api/stats', async (req, res) => {
         }
 
         let queries = [];
-=======
-        const now = Date.now();
-
-        // Extract user identity from JWT token
-        let isMasterAdmin = true;
-        let scopedUserId = null;
-        const authHeader = req.headers.authorization;
-        if (authHeader && authHeader.startsWith('Bearer ')) {
-            try {
-                const decoded = jwt.verify(authHeader.substring(7), JWT_SECRET);
-                if (!decoded.isMaster && decoded.role !== 'super_admin') {
-                    isMasterAdmin = false;
-                    scopedUserId = decoded.userId;
-                }
-            } catch (e) {
-                // Invalid/expired token — fall through to global stats
-            }
-        }
-
-        // Use cache only for global (master admin) stats
-        if (isMasterAdmin && statsCache && (now - statsCacheTime) < STATS_CACHE_DURATION) {
-            return res.json(statsCache);
-        }
-
-        // For regular admins, scope stats to their assigned agents
-        if (!isMasterAdmin && scopedUserId) {
-            const assignmentResult = await pool.query(
-                `SELECT agent_id FROM "${getTableName('User_Agents')}" WHERE user_id = $1`,
-                [scopedUserId]
-            );
-            const agentIds = assignmentResult.rows.map(r => r.agent_id);
-
-            if (agentIds.length === 0) {
-                return res.json({ totalAgents: 0, totalSessions: 0, totalDuration: 0, successRate: 0, hiddenStats: { agents: 0 } });
-            }
-
-            const [agentsRes, sessionsRes, completedRes, durationRes] = await Promise.all([
-                pool.query(
-                    `SELECT COUNT(*) FROM "${getTableName('Agents')}" WHERE agent_id = ANY($1::text[]) AND (is_hidden IS NULL OR is_hidden = FALSE)`,
-                    [agentIds]
-                ),
-                pool.query(
-                    `SELECT COUNT(s.*) as count FROM "${getTableName('Sessions')}" s WHERE s.agent_id = ANY($1::text[]) AND (s.is_hidden IS NULL OR s.is_hidden = FALSE)`,
-                    [agentIds]
-                ),
-                pool.query(
-                    `SELECT COUNT(s.*) as count FROM "${getTableName('Sessions')}" s WHERE s.agent_id = ANY($1::text[]) AND s.status = 'HTTP_COMPLETED' AND (s.is_hidden IS NULL OR s.is_hidden = FALSE)`,
-                    [agentIds]
-                ),
-                pool.query(
-                    `SELECT SUM(s.duration_seconds) as total_duration FROM "${getTableName('Sessions')}" s WHERE s.agent_id = ANY($1::text[]) AND (s.is_hidden IS NULL OR s.is_hidden = FALSE)`,
-                    [agentIds]
-                )
-            ]);
-
-            const totalAgents = parseInt(agentsRes.rows[0].count);
-            const totalSessions = parseInt(sessionsRes.rows[0].count);
-            const completedSessions = parseInt(completedRes.rows[0].count);
-            const totalDuration = parseInt(durationRes.rows[0].total_duration || 0);
-
-            return res.json({
-                totalAgents,
-                totalSessions,
-                totalDuration,
-                successRate: totalSessions > 0 ? ((completedSessions / totalSessions) * 100).toFixed(1) : 0,
-                hiddenStats: { agents: 0 }
-            });
-        }
-
-        // Global stats (master admin)
-        const [agentsRes, sessionsRes, completedRes, durationRes, hiddenAgentsRes] = await Promise.all([
-            pool.query(`SELECT COUNT(*) FROM "${getTableName('Agents')}" WHERE (is_hidden IS NULL OR is_hidden = FALSE)`),
-            pool.query(`
-                SELECT COUNT(s.*) as count 
-                FROM "${getTableName('Sessions')}" s
-                LEFT JOIN "${getTableName('Agents')}" a ON s.agent_id = a.agent_id
-                WHERE (s.is_hidden IS NULL OR s.is_hidden = FALSE) 
-                AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
-            `),
-            pool.query(`
-                SELECT COUNT(s.*) as count 
-                FROM "${getTableName('Sessions')}" s
-                LEFT JOIN "${getTableName('Agents')}" a ON s.agent_id = a.agent_id
-                WHERE s.status = 'HTTP_COMPLETED' 
-                AND (s.is_hidden IS NULL OR s.is_hidden = FALSE)
-                AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
-            `),
-            pool.query(`
-                SELECT SUM(s.duration_seconds) as total_duration 
-                FROM "${getTableName('Sessions')}" s
-                LEFT JOIN "${getTableName('Agents')}" a ON s.agent_id = a.agent_id
-                WHERE (s.is_hidden IS NULL OR s.is_hidden = FALSE)
-                AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
-            `),
-            pool.query(`SELECT COUNT(*) FROM "${getTableName('Agents')}" WHERE is_hidden = TRUE`)
-        ]);
->>>>>>> 1e7af8121ad39c30b9ba7f45d94d0ab9cfbbb2cd
 
         if (userRole === 'super_admin') {
             // Global Stats for Super Admin
@@ -3282,64 +3184,41 @@ app.post('/api/telephony/call', async (req, res) => {
                 lines: callsLines
             });
 
-<<<<<<< HEAD
-            // Execute calls sequentially in the background
+            // Execute calls in batches respecting line limits
             (async () => {
                 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
                 let successCount = 0;
                 let failCount = 0;
 
-                for (let i = 0; i < numbers.length; i++) {
-                    try {
-                        const response = await initiateSingleCall(numbers[i], names[i] || '');
-                        const sid = response.data?.Call?.Sid;
-                        await recordActiveCall(sid);
-                        successCount++;
-                        console.log(`✅ Call ${i + 1}/${numbers.length} to ${numbers[i]} - SUCCESS (SID: ${sid})`);
-                    } catch (callErr) {
-                        failCount++;
-                        console.error(`❌ Call ${i + 1}/${numbers.length} to ${numbers[i]} - FAILED:`, callErr.response?.data?.RestException?.Message || callErr.message);
-                    }
-                    // Wait 10 seconds before the next call (skip wait after the last one)
-                    if (i < numbers.length - 1) {
-                        await sleep(10000);
+                for (let i = 0; i < numbers.length; i += callsLines) {
+                    // Send a batch of up to callsLines calls concurrently
+                    const batch = numbers.slice(i, i + callsLines);
+                    const batchNames = names.slice(i, i + callsLines);
+
+                    const batchPromises = batch.map(async (num, idx) => {
+                        try {
+                            const response = await initiateSingleCall(num, batchNames[idx] || '');
+                            const sid = response.data?.Call?.Sid;
+                            if (sid) await recordActiveCall(sid);
+                            successCount++;
+                            console.log(`✅ Call ${i + idx + 1}/${numbers.length} to ${num} - SUCCESS (SID: ${sid})`);
+                        } catch (callErr) {
+                            failCount++;
+                            console.error(`❌ Call ${i + idx + 1}/${numbers.length} to ${num} - FAILED:`, callErr.response?.data?.RestException?.Message || callErr.message);
+                        }
+                    });
+
+                    await Promise.all(batchPromises);
+
+                    // Wait before sending the next batch (skip wait after the last batch)
+                    if (i + callsLines < numbers.length) {
+                        console.log(`⏳ Waiting ${callInterval}s before next batch (lines in use)...`);
+                        await sleep(callInterval * 1000);
                     }
                 }
+
                 console.log(`📊 Bulk call complete: ${successCount} success, ${failCount} failed out of ${numbers.length}`);
             })();
-=======
-            // Execute calls in batches respecting line limits
-            const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-            let successCount = 0;
-            let failCount = 0;
-
-            for (let i = 0; i < numbers.length; i += callsLines) {
-                // Send a batch of up to callsLines calls concurrently
-                const batch = numbers.slice(i, i + callsLines);
-                const batchNames = names.slice(i, i + callsLines);
-
-                const batchPromises = batch.map(async (num, idx) => {
-                    try {
-                        await initiateSingleCall(num, batchNames[idx] || '');
-                        successCount++;
-                        console.log(`✅ Call ${i + idx + 1}/${numbers.length} to ${num} - SUCCESS`);
-                    } catch (callErr) {
-                        failCount++;
-                        console.error(`❌ Call ${i + idx + 1}/${numbers.length} to ${num} - FAILED:`, callErr.response?.data?.RestException?.Message || callErr.message);
-                    }
-                });
-
-                await Promise.all(batchPromises);
-
-                // Wait before sending the next batch (skip wait after the last batch)
-                if (i + callsLines < numbers.length) {
-                    console.log(`⏳ Waiting ${callInterval}s before next batch (lines in use)...`);
-                    await sleep(callInterval * 1000);
-                }
-            }
-
-            console.log(`📊 Bulk call complete: ${successCount} success, ${failCount} failed out of ${numbers.length}`);
->>>>>>> 1e7af8121ad39c30b9ba7f45d94d0ab9cfbbb2cd
         }
 
     } catch (err) {

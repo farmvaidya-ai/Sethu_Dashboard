@@ -108,7 +108,6 @@ export const campaignAPI = {
     resumeCampaign: (campaignId) => api.post(`/api/campaigns/${campaignId}/resume`),
 };
 
-<<<<<<< HEAD
 export const paymentAPI = {
     createSubscription: () => api.post('/api/payment/subscription/create'),
     createRecharge: () => api.post('/api/payment/minutes/create'),
@@ -116,13 +115,13 @@ export const paymentAPI = {
     getBalances: () => api.get('/api/payment/balances'),
     getTransactionHistory: (filter = 'all', page = 1, limit = 50) => api.get('/api/payment/history', { params: { filter, page, limit } }),
     adjustCredits: (amount, targetUserId) => api.post('/api/payment/adjust-credits', { amount, targetUserId })
-=======
+};
+
 // Settings APIs
 export const settingsAPI = {
     getSettings: () => api.get('/api/settings'),
     updateSettings: (settings) => api.put('/api/settings', { settings }),
     getThrottleSettings: () => api.get('/api/settings/throttle'),
->>>>>>> 1e7af8121ad39c30b9ba7f45d94d0ab9cfbbb2cd
 };
 
 

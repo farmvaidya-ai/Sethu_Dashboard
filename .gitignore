@@ -48,13 +48,12 @@ diag.js
 *-output.txt
 *-output.log
 
-<<<<<<< HEAD
 campaign_contacts_sample.csv
 new_logs_fetch_from_postgre.md
-=======
 # PDFs (documentation)
 *.pdf
 
 # Uploads (user-generated)
 uploads/
->>>>>>> 1e7af8121ad39c30b9ba7f45d94d0ab9cfbbb2cd
+ngo-logs-2026-02-24.txt
+ngo-logs-2026-02-05-12-00-28.txt

@@ -3,11 +3,8 @@ import path from 'path';
 import fs from 'fs';
 import * as XLSX from 'xlsx';
 import pg from 'pg';
-<<<<<<< HEAD
 import jwt from 'jsonwebtoken';
-=======
 import axios from 'axios';
->>>>>>> 1e7af8121ad39c30b9ba7f45d94d0ab9cfbbb2cd
 import exotelService from '../services/exotel.service.js';
 
 const { Pool } = pg;

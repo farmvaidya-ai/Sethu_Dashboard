@@ -11,12 +11,9 @@ import ChangePassword from './pages/ChangePassword';
 import ForgotPassword from './pages/ForgotPassword';
 import ResetPassword from './pages/ResetPassword';
 import SystemStatus from './pages/SystemStatus';
-<<<<<<< HEAD
 import Billing from './pages/Billing';
 import UsageHistory from './pages/UsageHistory';
-=======
 import Settings from './pages/Settings';
->>>>>>> 1e7af8121ad39c30b9ba7f45d94d0ab9cfbbb2cd
 
 import Header from './components/Header';
 import DeactivationModal from './components/DeactivationModal';
