@@ -197,7 +197,7 @@ const waitForCallEnd = async (callSid, signal, maxWaitMs = 300000) => {
 };
 
 // --- Background call processor (slot-based concurrency) ---
-const processCampaignCalls = async (campaignId, contacts, callerId, appId, callIntervalSec, concurrentLines, retries) => {
+const processCampaignCalls = async (campaignId, contacts, callerId, appId, callIntervalSec, concurrentLines, retries, schedule) => {
     const signal = { aborted: false, abort: false };
     activeCampaigns.set(campaignId, signal);
 
@@ -207,6 +207,52 @@ const processCampaignCalls = async (campaignId, contacts, callerId, appId, callI
     const callResults = [];
     const retriesCount = retries?.number_of_retries || 0;
     const retryIntervalMin = retries?.interval_mins || 10;
+
+    // Daily time window helpers
+    const getDailyEndMinutes = () => {
+        if (!schedule?.daily_end_time) return null;
+        const [h, m] = schedule.daily_end_time.split(':').map(Number);
+        return h * 60 + m;
+    };
+    const getDailyStartMinutes = () => {
+        if (!schedule?.daily_start_time) return 9 * 60; // default 09:00
+        const [h, m] = schedule.daily_start_time.split(':').map(Number);
+        return h * 60 + m;
+    };
+    const isAfterDailyEnd = () => {
+        const endMins = getDailyEndMinutes();
+        if (endMins === null) return false;
+        const now = new Date();
+        return (now.getHours() * 60 + now.getMinutes()) >= endMins;
+    };
+    const waitUntilNextDailyStart = async () => {
+        const startMins = getDailyStartMinutes();
+        const now = new Date();
+        const tomorrow = new Date(now);
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        tomorrow.setHours(Math.floor(startMins / 60), startMins % 60, 0, 0);
+        const waitMs = tomorrow - now;
+        const waitHrs = (waitMs / 3_600_000).toFixed(1);
+        console.log(`⏸️ [Campaign ${campaignId}] Daily end time reached. Pausing ${waitHrs}h until ${tomorrow.toLocaleString()}`);
+        await pool.query(
+            `UPDATE "${LOCAL_CAMPAIGNS_TABLE}" SET status = 'paused-daily', date_updated = NOW() WHERE id = $1`,
+            [campaignId]
+        ).catch(() => {});
+
+        // Sleep in 1-minute chunks so abort is responsive
+        const chunk = 60_000;
+        let waited = 0;
+        while (waited < waitMs) {
+            if (signal.aborted || signal.abort) return;
+            await sleep(Math.min(chunk, waitMs - waited));
+            waited += chunk;
+        }
+        await pool.query(
+            `UPDATE "${LOCAL_CAMPAIGNS_TABLE}" SET status = 'in-progress', date_updated = NOW() WHERE id = $1`,
+            [campaignId]
+        ).catch(() => {});
+        console.log(`▶️ [Campaign ${campaignId}] Resuming daily calls.`);
+    };
 
     // Slot-based concurrency: track active lines
     let activeLines = 0;
@@ -306,6 +352,14 @@ const processCampaignCalls = async (campaignId, contacts, callerId, appId, callI
             while (activeLines >= concurrentLines) {
                 if (signal.aborted || signal.abort) break;
                 await sleep(2000); // Check every 2s for free line
+            }
+            if (signal.aborted || signal.abort) break;
+
+            // Daily time window check — pause and resume next day if past daily end time
+            while (isAfterDailyEnd()) {
+                if (signal.aborted || signal.abort) break;
+                await waitUntilNextDailyStart();
+                if (signal.aborted || signal.abort) break;
             }
             if (signal.aborted || signal.abort) break;
 
@@ -587,7 +641,7 @@ export const initiateCampaign = async (req, res) => {
         });
 
         // Fire and forget — process calls in background
-        processCampaignCalls(campaignId, campaignContacts, effectiveCallerId, agentAppId, callIntervalSec, concurrentLines, parsedRetries)
+        processCampaignCalls(campaignId, campaignContacts, effectiveCallerId, agentAppId, callIntervalSec, concurrentLines, parsedRetries, parsedSchedule)
             .catch(err => console.error(`❌ Background campaign error: ${err.message}`));
 
     } catch (error) {
@@ -614,6 +668,8 @@ export const getCampaigns = async (req, res) => {
                 date_updated: row.date_updated,
                 throttle: row.concurrent_lines,
                 call_interval_sec: row.call_interval_sec,
+                retries: row.retries,
+                schedule: row.schedule,
                 stats: {
                     total: row.total_contacts,
                     completed: row.completed_calls || 0,
