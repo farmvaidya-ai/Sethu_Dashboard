@@ -31,8 +31,9 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
         campaignName: '',
         retries: 2,
         retryInterval: 10,
-        scheduleTime: '',
-        scheduleEndTime: '',
+        scheduleTime: '',       // full datetime: when campaign first starts
+        dailyEndTime: '',       // HH:MM: daily cutoff time
+        dailyStartTime: '09:00', // HH:MM: daily resume time for subsequent days
         callInterval: 10 // seconds between calls
     });
 
@@ -271,7 +272,8 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
 
         const schedule = {};
         if (formData.scheduleTime) schedule.send_at = new Date(formData.scheduleTime).toISOString();
-        if (formData.scheduleEndTime) schedule.end_at = new Date(formData.scheduleEndTime).toISOString();
+        if (formData.dailyEndTime) schedule.daily_end_time = formData.dailyEndTime;   // "HH:MM"
+        if (formData.dailyStartTime) schedule.daily_start_time = formData.dailyStartTime; // "HH:MM"
 
         if (Object.keys(schedule).length > 0) {
             data.append('schedule', JSON.stringify(schedule));
@@ -289,7 +291,7 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
             await campaignAPI.createCampaign(data);
             toast.success('Campaign initiated! Contacts are being uploaded.');
             setFile(null);
-            setFormData({ campaignName: '', retries: 2, retryInterval: 10, scheduleTime: '', scheduleEndTime: '', callInterval: 10 });
+            setFormData({ campaignName: '', retries: 2, retryInterval: 10, scheduleTime: '', dailyEndTime: '', dailyStartTime: '09:00', callInterval: 10 });
             fetchCampaigns();
             setSubTab('inspect');
         } catch (error) {
@@ -481,6 +483,22 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
                         )}
                     </div>
 
+                    {/* Campaign Creation Instructions */}
+                    <div style={{ background: '#f0f9ff', borderRadius: '10px', border: '1px solid #bae6fd', padding: '1.25rem' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '0.75rem' }}>
+                            <FileText size={16} color="#0284c7" />
+                            <span style={{ fontWeight: '700', fontSize: '0.9rem', color: '#0c4a6e' }}>How to create a campaign</span>
+                        </div>
+                        <ol style={{ margin: 0, padding: '0 0 0 1.2rem', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                            <li style={{ color: '#0369a1', fontSize: '0.85rem', lineHeight: '1.5' }}><strong>Telephony setup</strong> – Ensure the Exophone (virtual number) is configured in the agent sidebar before launching a campaign.</li>
+                            <li style={{ color: '#0369a1', fontSize: '0.85rem', lineHeight: '1.5' }}><strong>Campaign Name</strong> – Give a descriptive name (e.g., <em>July Outreach</em>). Leave blank for an auto-generated name.</li>
+                            <li style={{ color: '#0369a1', fontSize: '0.85rem', lineHeight: '1.5' }}><strong>Upload contacts</strong> – Prepare a CSV/Excel file with a <code style={{ background: '#e0f2fe', padding: '1px 4px', borderRadius: '3px' }}>number</code> column (10-digit mobile) and an optional <code style={{ background: '#e0f2fe', padding: '1px 4px', borderRadius: '3px' }}>Name</code> column. Download the sample file for reference.</li>
+                            <li style={{ color: '#0369a1', fontSize: '0.85rem', lineHeight: '1.5' }}><strong>Daily Schedule (optional)</strong> – Set a <em>Start Time</em> (date &amp; time) for when the campaign first begins. Set a <em>Daily End Time</em> (e.g., <code style={{ background: '#e0f2fe', padding: '1px 4px', borderRadius: '3px' }}>18:00</code>) to stop calls each evening. Set a <em>Next Day Start</em> time (e.g., <code style={{ background: '#e0f2fe', padding: '1px 4px', borderRadius: '3px' }}>09:00</code>) — if contacts remain when the day ends, the campaign automatically pauses and resumes at that time the next morning, continuing day-by-day until every contact is called.</li>
+                            <li style={{ color: '#0369a1', fontSize: '0.85rem', lineHeight: '1.5' }}><strong>No. of Tries</strong> – Number of retry attempts for unanswered or failed calls (0 = no retry, max 5). Set the retry interval (in minutes) between attempts.</li>
+                            <li style={{ color: '#0369a1', fontSize: '0.85rem', lineHeight: '1.5' }}><strong>Launch</strong> – Click <strong>Launch Campaign</strong>. Track progress in the <em>Inspect Campaigns</em> tab.</li>
+                        </ol>
+                    </div>
+
                     <form onSubmit={handleCreate} style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
                         <div>
                             <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500', fontSize: '0.9rem', color: '#374151' }}>Campaign Name</label>
@@ -587,42 +605,57 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
                             </div>
                         </div>
                         {/* Schedule */}
-                        <div className="campaign-grid-2">
-                            <div>
-                                <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500', fontSize: '0.9rem', color: '#374151' }}>Start Time (Optional)</label>
-                                <input
-                                    type="datetime-local"
-                                    value={formData.scheduleTime}
-                                    onChange={e => setFormData({ ...formData, scheduleTime: e.target.value })}
-                                    min={new Date().toISOString().slice(0, 16)}
-                                    style={{ width: '100%', padding: '10px 14px', borderRadius: '8px', border: '2px solid #e5e7eb', fontSize: '0.95rem', outline: 'none' }}
-                                />
+                        <div style={{ background: '#f0fdf4', padding: '1.25rem', borderRadius: '12px', border: '1px solid #bbf7d0' }}>
+                            <h4 style={{ margin: '0 0 1rem', fontSize: '0.85rem', fontWeight: '700', textTransform: 'uppercase', color: '#166534', letterSpacing: '0.05em' }}>Daily Schedule (Optional)</h4>
+                            <div className="campaign-grid-3">
+                                <div>
+                                    <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500', fontSize: '0.9rem', color: '#374151' }}>Start Time</label>
+                                    <input
+                                        type="datetime-local"
+                                        value={formData.scheduleTime}
+                                        onChange={e => setFormData({ ...formData, scheduleTime: e.target.value })}
+                                        min={new Date().toISOString().slice(0, 16)}
+                                        style={{ width: '100%', padding: '10px 14px', borderRadius: '8px', border: '2px solid #e5e7eb', fontSize: '0.9rem', outline: 'none' }}
+                                    />
+                                    <p style={{ margin: '4px 0 0', fontSize: '0.75rem', color: '#6b7280' }}>When the campaign first begins</p>
+                                </div>
+                                <div>
+                                    <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500', fontSize: '0.9rem', color: '#374151' }}>Daily End Time</label>
+                                    <input
+                                        type="time"
+                                        value={formData.dailyEndTime}
+                                        onChange={e => setFormData({ ...formData, dailyEndTime: e.target.value })}
+                                        style={{ width: '100%', padding: '10px 14px', borderRadius: '8px', border: '2px solid #e5e7eb', fontSize: '0.9rem', outline: 'none' }}
+                                    />
+                                    <p style={{ margin: '4px 0 0', fontSize: '0.75rem', color: '#6b7280' }}>Calls stop at this time each day</p>
+                                </div>
+                                <div>
+                                    <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500', fontSize: '0.9rem', color: '#374151' }}>Next Day Start</label>
+                                    <input
+                                        type="time"
+                                        value={formData.dailyStartTime}
+                                        onChange={e => setFormData({ ...formData, dailyStartTime: e.target.value })}
+                                        style={{ width: '100%', padding: '10px 14px', borderRadius: '8px', border: '2px solid #e5e7eb', fontSize: '0.9rem', outline: 'none' }}
+                                    />
+                                    <p style={{ margin: '4px 0 0', fontSize: '0.75rem', color: '#6b7280' }}>Remaining calls resume here the next day</p>
+                                </div>
                             </div>
-                            <div>
-                                <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500', fontSize: '0.9rem', color: '#374151' }}>End Time (Optional)</label>
-                                <input
-                                    type="datetime-local"
-                                    value={formData.scheduleEndTime}
-                                    onChange={e => setFormData({ ...formData, scheduleEndTime: e.target.value })}
-                                    min={formData.scheduleTime || new Date().toISOString().slice(0, 16)}
-                                    style={{ width: '100%', padding: '10px 14px', borderRadius: '8px', border: '2px solid #e5e7eb', fontSize: '0.95rem', outline: 'none' }}
-                                />
-                            </div>
+                            <p style={{ margin: '0.75rem 0 0', fontSize: '0.8rem', color: '#166534' }}>If all contacts are not reached before Daily End Time, the campaign auto-pauses and resumes at Next Day Start the following morning — repeating until every contact is called.</p>
                         </div>
-                        <p style={{ fontSize: '0.8rem', color: '#94a3b8', marginTop: '-10px' }}>Leave blank to start immediately. End time auto-stops the campaign.</p>
 
 
 
                         {/* Advanced Options */}
                         <div style={{ background: '#f9fafb', padding: '1.5rem', borderRadius: '12px', border: '1px solid #e5e7eb', marginTop: '0.5rem' }}>
                             <h4 style={{ margin: '0 0 1rem', fontSize: '0.85rem', fontWeight: '700', textTransform: 'uppercase', color: '#64748b', letterSpacing: '0.05em' }}>Advanced Options</h4>
-                            <div className="campaign-grid-3">
+                            <div className="campaign-grid-2">
                                 <div>
-                                    <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500', fontSize: '0.9rem', color: '#374151' }}>Retries</label>
+                                    <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500', fontSize: '0.9rem', color: '#374151' }}>No. of Tries</label>
                                     <input type="number" min="0" max="5" value={formData.retries}
                                         onChange={e => setFormData({ ...formData, retries: e.target.value })}
                                         style={{ width: '100%', padding: '10px 14px', borderRadius: '8px', border: '2px solid #edeff1', fontSize: '0.95rem', outline: 'none' }}
                                     />
+                                    <p style={{ margin: '4px 0 0', fontSize: '0.75rem', color: '#94a3b8' }}>0 = single attempt, up to 5 retries on failure</p>
                                 </div>
                                 <div>
                                     <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500', fontSize: '0.9rem', color: '#374151' }}>Retry Interval (min)</label>
@@ -630,23 +663,7 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
                                         onChange={e => setFormData({ ...formData, retryInterval: e.target.value })}
                                         style={{ width: '100%', padding: '10px 14px', borderRadius: '8px', border: '2px solid #edeff1', fontSize: '0.95rem', outline: 'none' }}
                                     />
-                                </div>
-                                <div>
-                                    <label style={{ display: 'block', marginBottom: '6px', fontWeight: '500', fontSize: '0.9rem', color: '#374151' }}>
-                                        Call Interval (sec)
-                                        <span style={{ fontSize: '0.75rem', color: '#94a3b8', fontWeight: '400', marginLeft: '6px' }}>
-                                            campaign lines: {lineLimits.campaign}
-                                        </span>
-                                    </label>
-                                    <input type="number" min="5" max="300" value={formData.callInterval}
-                                        onChange={e => {
-                                            const val = parseInt(e.target.value) || 5;
-                                            setFormData({ ...formData, callInterval: Math.max(5, val) });
-                                        }}
-                                        placeholder="10"
-                                        style={{ width: '100%', padding: '10px 14px', borderRadius: '8px', border: '2px solid #edeff1', fontSize: '0.95rem', outline: 'none' }}
-                                    />
-                                    <p style={{ margin: '4px 0 0', fontSize: '0.75rem', color: '#94a3b8' }}>Seconds between calls. Lines limit from Settings.</p>
+                                    <p style={{ margin: '4px 0 0', fontSize: '0.75rem', color: '#94a3b8' }}>Minutes to wait before retrying a failed call</p>
                                 </div>
                             </div>
                         </div>
@@ -994,6 +1011,7 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
                                     <div style={{ fontSize: '0.75rem', color: '#92400e' }}>{new Date(selectedCampaign.date_created).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
                                 </div>
                             </div>
+
                         </div>
                     </div>
 
@@ -1050,13 +1068,12 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
                                             <th style={{ padding: '1rem', textAlign: 'left', fontWeight: '600', color: '#4b5563', fontSize: '0.85rem' }}>Phone Number</th>
                                             <th style={{ padding: '1rem', textAlign: 'left', fontWeight: '600', color: '#4b5563', fontSize: '0.85rem' }}>Contact Name</th>
                                             <th style={{ padding: '1rem', textAlign: 'left', fontWeight: '600', color: '#4b5563', fontSize: '0.85rem' }}>Status</th>
-                                            <th style={{ padding: '1rem', textAlign: 'left', fontWeight: '600', color: '#4b5563', fontSize: '0.85rem' }}>Duration</th>
                                             <th style={{ padding: '1rem', textAlign: 'left', fontWeight: '600', color: '#4b5563', fontSize: '0.85rem' }}>Actions</th>
                                         </tr>
                                     </thead>
                                     <tbody>
                                         {currentItems.length === 0 ? (
-                                            <tr><td colSpan={5} style={{ padding: '3rem', textAlign: 'center', color: '#94a3b8' }}>No calls match the filter.</td></tr>
+                                            <tr><td colSpan={4} style={{ padding: '3rem', textAlign: 'center', color: '#94a3b8' }}>No calls match the filter.</td></tr>
                                         ) : currentItems.map((call, i) => {
                                             const status = (call.status || call.Status || 'unknown').toLowerCase();
                                             const isSuccess = status === 'completed' || status === 'answered' || status === 'completed-success';
@@ -1081,16 +1098,6 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
                                                             {isSuccess ? <CheckCircle size={12} /> : <AlertCircle size={12} />}
                                                             {status.toUpperCase()}
                                                         </span>
-                                                    </td>
-                                                    <td style={{ padding: '1rem', fontSize: '0.85rem', color: '#64748b' }}>
-                                                        {(() => {
-                                                            const dur = parseInt(call.duration || call.conversation_duration || 0);
-                                                            if (dur <= 0) return '0s';
-                                                            if (dur < 60) return `${dur}s`;
-                                                            const m = Math.floor(dur / 60);
-                                                            const s = dur % 60;
-                                                            return `${m}m ${s}s`;
-                                                        })()}
                                                     </td>
                                                     <td style={{ padding: '1rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
                                                         {isSuccess && onNavigateToSession && (

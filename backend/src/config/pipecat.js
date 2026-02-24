@@ -187,12 +187,20 @@ class PipecatClient {
       }
 
       // CRITICAL: Post-fetch filter — the Pipecat API `query` param does broad full-text search
-      // and returns logs from UNRELATED sessions. Filter to only keep logs that actually
-      // belong to this session (their log text must contain the target session UUID).
+      // and returns logs from UNRELATED sessions. Filter rules:
+      //   1. Keep if log text explicitly contains our sessionId  → definitely ours
+      //   2. Keep if log text contains NO UUID at all            → session-neutral startup/init log
+      //   3. Drop if log text contains a DIFFERENT UUID          → belongs to another session
+      // Rule 2 is essential: early init/transport logs don't embed the session UUID but ARE
+      // part of the session (they're missing from deployment without this rule).
+      const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
       const beforeFilter = allLogs.length;
       const filteredLogs = allLogs.filter(log => {
         const msg = log.log || '';
-        return msg.includes(sessionId);
+        if (msg.includes(sessionId)) return true;   // explicitly ours
+        const m = msg.match(UUID_RE);
+        if (!m) return true;                         // no UUID → session-neutral, keep
+        return false;                                // different UUID → foreign session, drop
       });
 
       if (beforeFilter !== filteredLogs.length) {
