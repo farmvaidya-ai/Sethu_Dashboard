@@ -107,5 +107,12 @@ export const campaignAPI = {
     resumeCampaign: (campaignId) => api.post(`/api/campaigns/${campaignId}/resume`),
 };
 
+// Settings APIs
+export const settingsAPI = {
+    getSettings: () => api.get('/api/settings'),
+    updateSettings: (settings) => api.put('/api/settings', { settings }),
+    getThrottleSettings: () => api.get('/api/settings/throttle'),
+};
+
 
 export default api;
