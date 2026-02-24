@@ -1087,6 +1087,7 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
                                             const attemptsDone = call.attempts_done || 0;
                                             const retriesLeft = call.retries_left;
                                             const totalRetries = (retriesLeft !== null && retriesLeft !== undefined) ? attemptsDone + retriesLeft : null;
+                                            const campaignStatus = (selectedCampaign?.status || '').toLowerCase();
 
                                             return (
                                                 <tr key={call.sid || call.id || i} style={{ borderBottom: '1px solid #f1f5f9', background: 'white' }}>
@@ -1117,8 +1118,22 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
                                                                 badgeColor = '#c2410c'; badgeBg = '#fff7ed'; badgeBorder = '#fed7aa';
                                                                 icon = <RefreshCw size={12} />;
                                                             } else if (isPending) {
-                                                                badgeText = 'QUEUED'; badgeColor = '#475569'; badgeBg = '#f1f5f9'; badgeBorder = '#cbd5e1';
-                                                                icon = <Clock size={12} />;
+                                                                const isCampaignRunning = campaignStatus === 'in-progress' || campaignStatus === 'inprogress' || campaignStatus === 'created' || campaignStatus === 'scheduled';
+                                                                const isCampaignPaused = campaignStatus === 'paused';
+                                                                const isCampaignDone = campaignStatus === 'completed' || campaignStatus === 'failed';
+                                                                if (isCampaignRunning) {
+                                                                    badgeText = 'WAITING'; badgeColor = '#475569'; badgeBg = '#f1f5f9'; badgeBorder = '#cbd5e1';
+                                                                    icon = <Clock size={12} />;
+                                                                } else if (isCampaignPaused) {
+                                                                    badgeText = 'ON HOLD'; badgeColor = '#92400e'; badgeBg = '#fffbeb'; badgeBorder = '#fde68a';
+                                                                    icon = <Pause size={12} />;
+                                                                } else if (isCampaignDone) {
+                                                                    badgeText = 'NOT REACHED'; badgeColor = '#991b1b'; badgeBg = '#fef2f2'; badgeBorder = '#fecaca';
+                                                                    icon = <AlertCircle size={12} />;
+                                                                } else {
+                                                                    badgeText = 'QUEUED'; badgeColor = '#475569'; badgeBg = '#f1f5f9'; badgeBorder = '#cbd5e1';
+                                                                    icon = <Clock size={12} />;
+                                                                }
                                                             } else {
                                                                 badgeText = status.toUpperCase(); badgeColor = '#854d0e'; badgeBg = '#fef9c3'; badgeBorder = '#fde68a';
                                                                 icon = <AlertCircle size={12} />;
@@ -1135,6 +1150,16 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
                                                                             {attemptsDone} attempt{attemptsDone !== 1 ? 's' : ''} made
                                                                         </span>
                                                                     )}
+                                                                    {isPending && (() => {
+                                                                        const isCampaignRunning = campaignStatus === 'in-progress' || campaignStatus === 'inprogress' || campaignStatus === 'created' || campaignStatus === 'scheduled';
+                                                                        const isCampaignPaused = campaignStatus === 'paused';
+                                                                        const isCampaignDone = campaignStatus === 'completed' || campaignStatus === 'failed';
+                                                                        const hint = isCampaignRunning ? 'In queue — will be called shortly'
+                                                                            : isCampaignPaused ? 'Campaign paused before this call'
+                                                                            : isCampaignDone ? 'Campaign ended before this call'
+                                                                            : null;
+                                                                        return hint ? <span style={{ fontSize: '0.7rem', color: '#94a3b8', paddingLeft: '2px' }}>{hint}</span> : null;
+                                                                    })()}
                                                                 </div>
                                                             );
                                                         })()}
