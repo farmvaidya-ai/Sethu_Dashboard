@@ -13,6 +13,7 @@ import ResetPassword from './pages/ResetPassword';
 import SystemStatus from './pages/SystemStatus';
 import Billing from './pages/Billing';
 import UsageHistory from './pages/UsageHistory';
+import Settings from './pages/Settings';
 
 import Header from './components/Header';
 import DeactivationModal from './components/DeactivationModal';
@@ -94,6 +95,12 @@ function AppRoutes() {
 
         <PrivateRoute adminOnly={true}>
           <SystemStatus />
+        </PrivateRoute>
+      } />
+
+      <Route path="/admin/settings" element={
+        <PrivateRoute adminOnly={true}>
+          <Settings />
         </PrivateRoute>
       } />
 

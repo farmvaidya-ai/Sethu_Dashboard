@@ -304,6 +304,38 @@ const initDatabase = async () => {
             console.error(`Error creating Agent_Telephony_Config table:`, tableErr.message);
         }
 
+        // Create System_Settings table for throttle & other global configs
+        console.log(`Checking/Creating table: ${getTableName('System_Settings')}...`);
+        try {
+            await pool.query(`
+                CREATE TABLE IF NOT EXISTS "${getTableName('System_Settings')}" (
+                    setting_key TEXT PRIMARY KEY,
+                    setting_value TEXT NOT NULL,
+                    description TEXT,
+                    updated_by TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            `);
+            // Ensure description column exists for pre-existing tables
+            try {
+                await pool.query(`ALTER TABLE "${getTableName('System_Settings')}" ADD COLUMN IF NOT EXISTS description TEXT`);
+                await pool.query(`ALTER TABLE "${getTableName('System_Settings')}" ADD COLUMN IF NOT EXISTS updated_by TEXT`);
+                await pool.query(`ALTER TABLE "${getTableName('System_Settings')}" ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`);
+            } catch (colErr) { /* ignore if exists */ }
+            // Seed default throttle settings if not present
+            await pool.query(`
+                INSERT INTO "${getTableName('System_Settings')}" (setting_key, setting_value, updated_by)
+                VALUES 
+                    ('total_throttle_cpm', '4', 'system'),
+                    ('campaign_throttle_cpm', '2', 'system'),
+                    ('calls_throttle_cpm', '2', 'system')
+                ON CONFLICT (setting_key) DO NOTHING
+            `);
+            console.log(`✅ ${getTableName('System_Settings')} table initialized`);
+        } catch (tableErr) {
+            console.error(`Error creating System_Settings table:`, tableErr.message);
+        }
+
         console.log('✅ Database tables initialized/verified');
 
         // Optimize Sessions Table with Indices
@@ -958,6 +990,101 @@ app.get('/api/stats', async (req, res) => {
             const userRes = await pool.query(`SELECT role FROM "${getTableName('Users')}" WHERE user_id = $1`, [requesterId]);
             if (userRes.rows[0]) userRole = userRes.rows[0].role;
         }
+        const now = Date.now();
+
+        // Extract user identity from JWT token
+        let isMasterAdmin = true;
+        let scopedUserId = null;
+        const authHeader = req.headers.authorization;
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+            try {
+                const decoded = jwt.verify(authHeader.substring(7), JWT_SECRET);
+                if (!decoded.isMaster && decoded.role !== 'super_admin') {
+                    isMasterAdmin = false;
+                    scopedUserId = decoded.userId;
+                }
+            } catch (e) {
+                // Invalid/expired token — fall through to global stats
+            }
+        }
+
+        // Use cache only for global (master admin) stats
+        if (isMasterAdmin && statsCache && (now - statsCacheTime) < STATS_CACHE_DURATION) {
+            return res.json(statsCache);
+        }
+
+        // For regular admins, scope stats to their assigned agents
+        if (!isMasterAdmin && scopedUserId) {
+            const assignmentResult = await pool.query(
+                `SELECT agent_id FROM "${getTableName('User_Agents')}" WHERE user_id = $1`,
+                [scopedUserId]
+            );
+            const agentIds = assignmentResult.rows.map(r => r.agent_id);
+
+            if (agentIds.length === 0) {
+                return res.json({ totalAgents: 0, totalSessions: 0, totalDuration: 0, successRate: 0, hiddenStats: { agents: 0 } });
+            }
+
+            const [agentsRes, sessionsRes, completedRes, durationRes] = await Promise.all([
+                pool.query(
+                    `SELECT COUNT(*) FROM "${getTableName('Agents')}" WHERE agent_id = ANY($1::text[]) AND (is_hidden IS NULL OR is_hidden = FALSE)`,
+                    [agentIds]
+                ),
+                pool.query(
+                    `SELECT COUNT(s.*) as count FROM "${getTableName('Sessions')}" s WHERE s.agent_id = ANY($1::text[]) AND (s.is_hidden IS NULL OR s.is_hidden = FALSE)`,
+                    [agentIds]
+                ),
+                pool.query(
+                    `SELECT COUNT(s.*) as count FROM "${getTableName('Sessions')}" s WHERE s.agent_id = ANY($1::text[]) AND s.status = 'HTTP_COMPLETED' AND (s.is_hidden IS NULL OR s.is_hidden = FALSE)`,
+                    [agentIds]
+                ),
+                pool.query(
+                    `SELECT SUM(s.duration_seconds) as total_duration FROM "${getTableName('Sessions')}" s WHERE s.agent_id = ANY($1::text[]) AND (s.is_hidden IS NULL OR s.is_hidden = FALSE)`,
+                    [agentIds]
+                )
+            ]);
+
+            const totalAgents = parseInt(agentsRes.rows[0].count);
+            const totalSessions = parseInt(sessionsRes.rows[0].count);
+            const completedSessions = parseInt(completedRes.rows[0].count);
+            const totalDuration = parseInt(durationRes.rows[0].total_duration || 0);
+
+            return res.json({
+                totalAgents,
+                totalSessions,
+                totalDuration,
+                successRate: totalSessions > 0 ? ((completedSessions / totalSessions) * 100).toFixed(1) : 0,
+                hiddenStats: { agents: 0 }
+            });
+        }
+
+        // Global stats (master admin)
+        const [agentsRes, sessionsRes, completedRes, durationRes, hiddenAgentsRes] = await Promise.all([
+            pool.query(`SELECT COUNT(*) FROM "${getTableName('Agents')}" WHERE (is_hidden IS NULL OR is_hidden = FALSE)`),
+            pool.query(`
+                SELECT COUNT(s.*) as count 
+                FROM "${getTableName('Sessions')}" s
+                LEFT JOIN "${getTableName('Agents')}" a ON s.agent_id = a.agent_id
+                WHERE (s.is_hidden IS NULL OR s.is_hidden = FALSE) 
+                AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
+            `),
+            pool.query(`
+                SELECT COUNT(s.*) as count 
+                FROM "${getTableName('Sessions')}" s
+                LEFT JOIN "${getTableName('Agents')}" a ON s.agent_id = a.agent_id
+                WHERE s.status = 'HTTP_COMPLETED' 
+                AND (s.is_hidden IS NULL OR s.is_hidden = FALSE)
+                AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
+            `),
+            pool.query(`
+                SELECT SUM(s.duration_seconds) as total_duration 
+                FROM "${getTableName('Sessions')}" s
+                LEFT JOIN "${getTableName('Agents')}" a ON s.agent_id = a.agent_id
+                WHERE (s.is_hidden IS NULL OR s.is_hidden = FALSE)
+                AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
+            `),
+            pool.query(`SELECT COUNT(*) FROM "${getTableName('Agents')}" WHERE is_hidden = TRUE`)
+        ]);
 
         let queries = [];
 
@@ -3033,15 +3160,30 @@ app.post('/api/telephony/call', async (req, res) => {
             await recordActiveCall(sid);
             return res.json({ success: true, data: response.data });
         } else {
-            // Bulk Call - Sequential with 10-second delay between each call
-            console.log(`🚀 Starting Sequential Bulk Call for ${numbers.length} numbers (1 call every 10 sec)...`);
+            // Bulk Call - Line-aware sequential processing
+            // Fetch call lines limit from settings
+            let callsLines = 2; // default
+            let callInterval = 10; // seconds between each call initiation
+            try {
+                const settingsResult = await pool.query(
+                    `SELECT setting_key, setting_value FROM "${getTableName('System_Settings')}" WHERE setting_key IN ('calls_throttle_cpm')`
+                );
+                settingsResult.rows.forEach(r => {
+                    if (r.setting_key === 'calls_throttle_cpm') callsLines = parseInt(r.setting_value) || 2;
+                });
+            } catch (dbErr) {
+                console.warn('⚠️ Could not fetch call line settings, using defaults:', dbErr.message);
+            }
+
+            console.log(`🚀 Starting Line-Aware Bulk Call: ${numbers.length} numbers, ${callsLines} concurrent lines, ${callInterval}s interval...`);
 
             // Respond immediately with accepted status
             res.json({
                 success: true,
                 bulk: true,
-                message: `Campaign started: ${numbers.length} calls will be made sequentially (1 per 10 seconds)`,
-                total: numbers.length
+                message: `Campaign started: ${numbers.length} calls will be made (${callsLines} lines, ${callInterval}s interval)`,
+                total: numbers.length,
+                lines: callsLines
             });
 
             // Execute calls sequentially in the background
@@ -3049,6 +3191,35 @@ app.post('/api/telephony/call', async (req, res) => {
                 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
                 let successCount = 0;
                 let failCount = 0;
+            // Execute calls in batches respecting line limits
+            const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+            let successCount = 0;
+            let failCount = 0;
+
+            for (let i = 0; i < numbers.length; i += callsLines) {
+                // Send a batch of up to callsLines calls concurrently
+                const batch = numbers.slice(i, i + callsLines);
+                const batchNames = names.slice(i, i + callsLines);
+
+                const batchPromises = batch.map(async (num, idx) => {
+                    try {
+                        await initiateSingleCall(num, batchNames[idx] || '');
+                        successCount++;
+                        console.log(`✅ Call ${i + idx + 1}/${numbers.length} to ${num} - SUCCESS`);
+                    } catch (callErr) {
+                        failCount++;
+                        console.error(`❌ Call ${i + idx + 1}/${numbers.length} to ${num} - FAILED:`, callErr.response?.data?.RestException?.Message || callErr.message);
+                    }
+                });
+
+                await Promise.all(batchPromises);
+
+                // Wait before sending the next batch (skip wait after the last batch)
+                if (i + callsLines < numbers.length) {
+                    console.log(`⏳ Waiting ${callInterval}s before next batch (lines in use)...`);
+                    await sleep(callInterval * 1000);
+                }
+            }
 
                 for (let i = 0; i < numbers.length; i++) {
                     try {
@@ -3218,6 +3389,125 @@ app.get('/api/system/status', async (req, res) => {
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+// ========== SYSTEM SETTINGS API ==========
+
+// GET /api/settings - Get all system settings (admin/master only)
+app.get('/api/settings', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'No token' });
+    const token = authHeader.split(' ')[1];
+
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        const requesterId = decoded.userId;
+        const isMaster = decoded.isMaster && requesterId === 'master_root_0';
+
+        if (!isMaster) {
+            const userRes = await pool.query(`SELECT role FROM "${getTableName('Users')}" WHERE user_id = $1`, [requesterId]);
+            const user = userRes.rows[0];
+            if (!user || user.role !== 'super_admin') {
+                return res.status(403).json({ error: 'Access denied. Only Super Admin or Master Admin can access settings.' });
+            }
+        }
+
+        const result = await pool.query(`SELECT setting_key, setting_value, description, updated_by, updated_at FROM "${getTableName('System_Settings')}" ORDER BY setting_key`);
+        const settings = {};
+        result.rows.forEach(row => {
+            settings[row.setting_key] = {
+                value: row.setting_value,
+                description: row.description,
+                updatedBy: row.updated_by,
+                updatedAt: row.updated_at
+            };
+        });
+
+        res.json({ success: true, settings });
+    } catch (err) {
+        console.error('Error fetching settings:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// PUT /api/settings - Update system settings (admin/master only)
+app.put('/api/settings', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'No token' });
+    const token = authHeader.split(' ')[1];
+
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        const requesterId = decoded.userId;
+        const isMaster = decoded.isMaster && requesterId === 'master_root_0';
+        let updatedBy = 'master';
+
+        if (!isMaster) {
+            const userRes = await pool.query(`SELECT role, email FROM "${getTableName('Users')}" WHERE user_id = $1`, [requesterId]);
+            const user = userRes.rows[0];
+            if (!user || user.role !== 'super_admin') {
+                return res.status(403).json({ error: 'Access denied. Only Super Admin or Master Admin can update settings.' });
+            }
+            updatedBy = user.email || requesterId;
+        }
+
+        const { settings } = req.body;
+        if (!settings || typeof settings !== 'object') {
+            return res.status(400).json({ error: 'Settings object is required' });
+        }
+
+        // Validate throttle values
+        const totalThrottle = parseInt(settings.total_throttle_cpm);
+        const campaignThrottle = parseInt(settings.campaign_throttle_cpm);
+        const callsThrottle = parseInt(settings.calls_throttle_cpm);
+
+        if (isNaN(totalThrottle) || totalThrottle < 1) {
+            return res.status(400).json({ error: 'Total lines must be at least 1' });
+        }
+        if (isNaN(campaignThrottle) || campaignThrottle < 0) {
+            return res.status(400).json({ error: 'Campaign lines cannot be negative' });
+        }
+        if (isNaN(callsThrottle) || callsThrottle < 0) {
+            return res.status(400).json({ error: 'Normal call lines cannot be negative' });
+        }
+        if (campaignThrottle + callsThrottle > totalThrottle) {
+            return res.status(400).json({ error: `Campaign (${campaignThrottle}) + Normal Calls (${callsThrottle}) cannot exceed total (${totalThrottle}) lines` });
+        }
+
+        // Update each setting
+        for (const [key, value] of Object.entries(settings)) {
+            await pool.query(`
+                INSERT INTO "${getTableName('System_Settings')}" (setting_key, setting_value, updated_by, updated_at)
+                VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+                ON CONFLICT (setting_key) DO UPDATE SET setting_value = $2, updated_by = $3, updated_at = CURRENT_TIMESTAMP
+            `, [key, String(value), updatedBy]);
+        }
+
+        res.json({ success: true, message: 'Settings updated successfully' });
+    } catch (err) {
+        console.error('Error updating settings:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// GET /api/settings/throttle - Get throttle settings (used by campaign controller, no admin required)
+app.get('/api/settings/throttle', async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT setting_key, setting_value FROM "${getTableName('System_Settings')}" 
+            WHERE setting_key IN ('total_throttle_cpm', 'campaign_throttle_cpm', 'calls_throttle_cpm')
+        `);
+        const throttle = { total: 4, campaign: 2, calls: 2 }; // defaults
+        result.rows.forEach(row => {
+            if (row.setting_key === 'total_throttle_cpm') throttle.total = parseInt(row.setting_value);
+            if (row.setting_key === 'campaign_throttle_cpm') throttle.campaign = parseInt(row.setting_value);
+            if (row.setting_key === 'calls_throttle_cpm') throttle.calls = parseInt(row.setting_value);
+        });
+        res.json({ success: true, throttle });
+    } catch (err) {
+        console.error('Error fetching throttle settings:', err.message);
+        res.json({ success: true, throttle: { total: 4, campaign: 2, calls: 2 } }); // fallback defaults
     }
 });
 

@@ -105,7 +105,7 @@ class PipecatClient {
   }
 
   // Get logs for an agent session (using agent NAME and sessionId)
-  // query param allows server-side filtering (e.g., "Generating TTS" or "Generating chat")
+  // IMPORTANT: Pipecat API ignores `session_id` param - use `query` for filtering
   async getAgentLogs(agentName, sessionId, page = 1, limit = 100, query = null) {
     try {
       const params = {
@@ -117,8 +117,9 @@ class PipecatClient {
         params.offset = (page - 1) * limit;
       }
 
-      if (sessionId) {
-        params.session_id = sessionId;
+      // Use `query` param for session ID filtering (session_id param is ignored by API)
+      if (sessionId && !query) {
+        params.query = sessionId;
       }
 
       if (query) {
@@ -144,6 +145,75 @@ class PipecatClient {
 
     } catch (error) {
       logger.error(`Failed to fetch logs for agent ${agentName}, session ${sessionId}:`, error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Fetch ALL logs for a specific session with full pagination.
+   * Uses `query` param to filter by session UUID at the API level.
+   * Returns deduplicated logs sorted by timestamp.
+   */
+  async getAllLogsForSessionById(agentName, sessionId, maxLogs = 10000) {
+    const allLogs = [];
+    let page = 1;
+    const limit = 1000; // Max page size for efficiency
+    const seen = new Set();
+
+    try {
+      while (true) {
+        const response = await this.getAgentLogs(agentName, sessionId, page, limit);
+        const logs = response.data || [];
+
+        if (!logs || logs.length === 0) break;
+
+        // Deduplicate by timestamp+content to prevent pagination overlap
+        for (const log of logs) {
+          const key = `${log.timestamp}|${(log.log || '').substring(0, 200)}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            allLogs.push(log);
+          }
+        }
+
+        if (!response.hasMore || logs.length < limit) break;
+        if (allLogs.length >= maxLogs) {
+          logger.warn(`Hit ${maxLogs} log limit for session ${sessionId}`);
+          break;
+        }
+
+        page++;
+        await this.delay(this.rateLimitDelay);
+      }
+
+      // CRITICAL: Post-fetch filter — the Pipecat API `query` param does broad full-text search
+      // and returns logs from UNRELATED sessions. Filter rules:
+      //   1. Keep if log text explicitly contains our sessionId  → definitely ours
+      //   2. Keep if log text contains NO UUID at all            → session-neutral startup/init log
+      //   3. Drop if log text contains a DIFFERENT UUID          → belongs to another session
+      // Rule 2 is essential: early init/transport logs don't embed the session UUID but ARE
+      // part of the session (they're missing from deployment without this rule).
+      const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+      const beforeFilter = allLogs.length;
+      const filteredLogs = allLogs.filter(log => {
+        const msg = log.log || '';
+        if (msg.includes(sessionId)) return true;   // explicitly ours
+        const m = msg.match(UUID_RE);
+        if (!m) return true;                         // no UUID → session-neutral, keep
+        return false;                                // different UUID → foreign session, drop
+      });
+
+      if (beforeFilter !== filteredLogs.length) {
+        logger.info(`🔒 Session ${sessionId}: filtered ${beforeFilter} → ${filteredLogs.length} logs (removed ${beforeFilter - filteredLogs.length} foreign-session logs)`);
+      }
+
+      // Sort by timestamp ascending
+      filteredLogs.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+      logger.debug(`Fetched ${filteredLogs.length} deduplicated+filtered logs for session ${sessionId}`);
+      return filteredLogs;
+    } catch (error) {
+      logger.error(`Failed to fetch all logs for session ${sessionId}:`, error.message);
       throw error;
     }
   }

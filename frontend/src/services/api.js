@@ -114,6 +114,11 @@ export const paymentAPI = {
     getBalances: () => api.get('/api/payment/balances'),
     getTransactionHistory: (filter = 'all', page = 1, limit = 50) => api.get('/api/payment/history', { params: { filter, page, limit } }),
     adjustCredits: (amount, targetUserId) => api.post('/api/payment/adjust-credits', { amount, targetUserId })
+// Settings APIs
+export const settingsAPI = {
+    getSettings: () => api.get('/api/settings'),
+    updateSettings: (settings) => api.put('/api/settings', { settings }),
+    getThrottleSettings: () => api.get('/api/settings/throttle'),
 };
 
 
