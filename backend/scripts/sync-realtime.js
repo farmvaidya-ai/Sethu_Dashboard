@@ -513,6 +513,41 @@ async function syncConversations(client, agents) {
                 logger.info(`📊 Replacing ${sessionId}: fewer turns (${existing.turns.length}→${turns.length}) but better quality`);
             }
 
+                    // 2. Intelligent Merge: If new data has "holes" (missing text) that we already have, fill them.
+                    if (existing && existing.turns && turns.length > 0) {
+                        let preservedCount = 0;
+                        turns.forEach((newTurn, index) => {
+                            if (index < existing.turns.length) {
+                                const oldTurn = existing.turns[index];
+
+                                // Protect Assistant Message (The main issue)
+                                if (!newTurn.assistant_message && oldTurn.assistant_message) {
+                                    newTurn.assistant_message = oldTurn.assistant_message;
+                                    preservedCount++;
+                                }
+                                // Protect User Message - Missing or Truncated
+                                if (!newTurn.user_message && oldTurn.user_message) {
+                                    newTurn.user_message = oldTurn.user_message;
+                                    preservedCount++;
+                                } else if (newTurn.user_message && oldTurn.user_message) {
+                                    // Anti-Truncation Protection:
+                                    // If old message is significantly longer than new message, it means we probably have a truncation bug in the new parse.
+                                    // "Okay I" (6 chars) vs "Okay I'm a student..." (20+ chars)
+                                    if (oldTurn.user_message.length > newTurn.user_message.length + 5) {
+                                        newTurn.user_message = oldTurn.user_message;
+                                        preservedCount++;
+                                        logger.info(`🛡️ Protected truncated user message for turn ${newTurn.turn_id} in ${sessionId}. Kept ${oldTurn.user_message.length} chars vs new ${newTurn.user_message.length}`);
+                                    }
+                                }
+                            }
+                        });
+
+                        if (preservedCount > 0) {
+                            if (agent.name.toLowerCase().includes('ngo')) {
+                                logger.info(`🛡️ Protected ${preservedCount} messages for ${sessionId} (NGO Agent)`);
+                            } else {
+                                logger.debug(`🛡️ Protected ${preservedCount} messages for ${sessionId}`);
+                            }
             // 2. Intelligent Merge: Fill holes in new data from existing data
             if (existing && existing.turns && turns.length > 0) {
                 let preservedCount = 0;

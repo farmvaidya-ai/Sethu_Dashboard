@@ -56,52 +56,77 @@ function cleanUserMessage(msg) {
 }
 
 /**
- * Parse turn-based log format (webagent style)
- * Extracts conversation turns from context [...] structure
+ * Parse raw messages from context array content string
+ * Handles unescaped quotes by checking for delimiters
  */
-function parseContextLog(logMessage) {
-    const turns = [];
-    const arrayMatch = logMessage.match(/context \[(.+)\]$/s);
-    if (!arrayMatch) return [];
-
-    const arrayContent = arrayMatch[1];
+function parseRawMessages(arrayContent) {
     const messages = [];
     let pos = 0;
 
     while (pos < arrayContent.length) {
-        const userMatch = arrayContent.indexOf("'role': 'user'", pos);
-        const assistantMatch = arrayContent.indexOf("'role': 'assistant'", pos);
+        // Find next role definition (user or assistant)
+        // Support both single and double quotes
+        // We look for the start of a role definition
+        const patterns = [
+            { type: 'user', str: "'role': 'user'" },
+            { type: 'assistant', str: "'role': 'assistant'" },
+            { type: 'user', str: '"role": "user"' },
+            { type: 'assistant', str: '"role": "assistant"' }
+        ];
 
         let nextMsgPos = -1;
         let type = '';
+        let matchedPatternLength = 0;
 
-        if (userMatch !== -1 && (assistantMatch === -1 || userMatch < assistantMatch)) {
-            nextMsgPos = userMatch;
-            type = 'user';
-        } else if (assistantMatch !== -1) {
-            nextMsgPos = assistantMatch;
-            type = 'assistant';
+        for (const p of patterns) {
+            const idx = arrayContent.indexOf(p.str, pos);
+            if (idx !== -1) {
+                if (nextMsgPos === -1 || idx < nextMsgPos) {
+                    nextMsgPos = idx;
+                    type = p.type;
+                    matchedPatternLength = p.str.length;
+                }
+            }
         }
 
         if (nextMsgPos === -1) break;
 
-        let contentStart = arrayContent.indexOf("'content': '", nextMsgPos);
+        // Find content field
+        // Search for 'content': ' or 'content': " or "content": "
+        let contentStart = -1;
         let quoteChar = "'";
+        let prefix = "";
 
-        const doubleQuoteStart = arrayContent.indexOf("'content': \"", nextMsgPos);
+        // Try single quote key
+        const sqContent1 = arrayContent.indexOf("'content': '", nextMsgPos);
+        const sqContent2 = arrayContent.indexOf("'content': \"", nextMsgPos);
 
-        if (contentStart === -1 || (doubleQuoteStart !== -1 && doubleQuoteStart < contentStart)) {
-            contentStart = doubleQuoteStart;
-            quoteChar = '"';
-        }
+        // Try double quote key
+        const dqContent = arrayContent.indexOf('"content": "', nextMsgPos);
+        const dqContent2 = arrayContent.indexOf('"content": \'', nextMsgPos); // "content": '
 
-        if (contentStart === -1) {
-            pos = nextMsgPos + 10;
+        // Find the earliest content field after the role
+        const candidates = [];
+        // Ensure candidate is AFTER the role definition
+        if (sqContent1 !== -1 && sqContent1 > nextMsgPos) candidates.push({ pos: sqContent1, q: "'", pre: "'content': '" });
+        if (sqContent2 !== -1 && sqContent2 > nextMsgPos) candidates.push({ pos: sqContent2, q: '"', pre: "'content': \"" });
+        if (dqContent !== -1 && dqContent > nextMsgPos) candidates.push({ pos: dqContent, q: '"', pre: '"content": "' });
+        if (dqContent2 !== -1 && dqContent2 > nextMsgPos) candidates.push({ pos: dqContent2, q: "'", pre: '"content": \'' });
+
+        candidates.sort((a, b) => a.pos - b.pos);
+
+        const best = candidates[0];
+
+        if (!best) {
+            pos = nextMsgPos + matchedPatternLength;
             continue;
         }
 
-        const contentValueStart = contentStart + ` 'content': ${quoteChar}`.length - 1;
+        contentStart = best.pos;
+        quoteChar = best.q;
+        prefix = best.pre;
 
+        const contentValueStart = contentStart + prefix.length;
         let contentEnd = contentValueStart;
         let escaped = false;
 
@@ -113,7 +138,15 @@ function parseContextLog(logMessage) {
                 escaped = true;
             } else if (char === quoteChar) {
                 const after = arrayContent.substring(contentEnd + 1, contentEnd + 3);
-                if (after.startsWith('}') || after.startsWith(', ') || after.startsWith('}\n') || after.startsWith('},')) {
+                // Check for delimiters indicating end of value: }, , } (followed by newline), },
+                // Also handle JSON style "}," or "}\n"
+                const afterTrimmed = after.trim();
+                // We check the raw 'after' string first for strict matches usually found in python repr
+                if (after.startsWith('}') || after.startsWith(',') || after.startsWith('}\n') || after.startsWith('},')) {
+                    break;
+                }
+                // Fallback for JSON or loose spacing
+                if (afterTrimmed.startsWith('}') || afterTrimmed.startsWith(',')) {
                     break;
                 }
             }
@@ -128,6 +161,20 @@ function parseContextLog(logMessage) {
         messages.push({ role: type, content });
         pos = contentEnd + 1;
     }
+
+    return messages;
+}
+
+/**
+ * Parse turn-based log format (webagent style)
+ * Extracts conversation turns from context [...] structure
+ */
+function parseContextLog(logMessage) {
+    const turns = [];
+    const arrayMatch = logMessage.match(/context \[(.+)\]$/s);
+    if (!arrayMatch) return [];
+
+    const messages = parseRawMessages(arrayMatch[1]);
 
     let turnId = 0;
     for (let i = 0; i < messages.length; i++) {
@@ -314,26 +361,17 @@ function parseEventBasedLogs(logs, targetSessionId = null) {
 
             // Backup detection from Context logs (for agents like webagent)
             if (msg.includes('Generating chat from universal context') || msg.includes('context [')) {
-                let lastMatch = null;
-
-                // Python style (single quotes) - Most common in Python logs
-                const singleQuoteRegex = /'role':\s*'user',\s*'content':\s*'((?:[^'\\]|\\.)*?)'/g;
-                let match;
-                while ((match = singleQuoteRegex.exec(msg)) !== null) {
-                    lastMatch = match;
-                }
-
-                // JSON style (double quotes) - Fallback
-                if (!lastMatch) {
-                    const doubleQuoteRegex = /"role":\s*"user",\s*"content":\s*"((?:[^"\\]|\\.)*?)"/g;
-                    while ((match = doubleQuoteRegex.exec(msg)) !== null) {
-                        lastMatch = match;
+                // Use robust parser instead of regex
+                const contextMatch = msg.match(/context \[(.+)\]/s);
+                if (contextMatch) {
+                    const extractedMsgs = parseRawMessages(contextMatch[1]);
+                    // Get the last user message
+                    for (let i = extractedMsgs.length - 1; i >= 0; i--) {
+                        if (extractedMsgs[i].role === 'user') {
+                            userTranscription = extractedMsgs[i].content.trim();
+                            break;
+                        }
                     }
-                }
-
-                if (lastMatch) {
-                    // match[1] is the content capture group
-                    userTranscription = lastMatch[1].trim();
                 }
             }
 

@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { authAPI } from '../services/api';
 
 const AuthContext = createContext(null);
@@ -42,6 +42,14 @@ export const AuthProvider = ({ children }) => {
                 try {
                     const response = await authAPI.getProfile();
                     const userData = response.data.user;
+
+                    // Auto-update user balance if changed
+                    setUser(prev => {
+                        if (prev && prev.minutes_balance !== userData.minutes_balance) {
+                            return { ...prev, minutes_balance: userData.minutes_balance };
+                        }
+                        return prev;
+                    });
 
                     if (userData && userData.isActive === false) {
                         console.log('User detected as inactive:', userData.email);
@@ -92,7 +100,7 @@ export const AuthProvider = ({ children }) => {
     const loadUserData = async () => {
         try {
             const response = await authAPI.getProfile(); // Uses /api/me
-            setUser(response.data.user);
+            setUser({ ...response.data.user, minutes_balance: response.data.user.minutes_balance || 0 });
         } catch (error) {
             console.error('Failed to load user data:', error);
             logout();
@@ -166,7 +174,8 @@ export const AuthProvider = ({ children }) => {
         isAuthenticated: !!token && !!user,
         isDeactivated,
         deactivationReason,
-        deactivationCountdown
+        deactivationCountdown,
+        refreshUser: loadUserData
     };
 
     return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

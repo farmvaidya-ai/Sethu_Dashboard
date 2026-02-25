@@ -107,6 +107,13 @@ export const campaignAPI = {
     resumeCampaign: (campaignId) => api.post(`/api/campaigns/${campaignId}/resume`),
 };
 
+export const paymentAPI = {
+    createSubscription: () => api.post('/api/payment/subscription/create'),
+    createRecharge: () => api.post('/api/payment/minutes/create'),
+    verifyPayment: (data) => api.post('/api/payment/verify', data),
+    getBalances: () => api.get('/api/payment/balances'),
+    getTransactionHistory: (filter = 'all', page = 1, limit = 50) => api.get('/api/payment/history', { params: { filter, page, limit } }),
+    adjustCredits: (amount, targetUserId) => api.post('/api/payment/adjust-credits', { amount, targetUserId })
 // Settings APIs
 export const settingsAPI = {
     getSettings: () => api.get('/api/settings'),

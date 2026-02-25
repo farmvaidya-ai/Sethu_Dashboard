@@ -13,6 +13,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import jwt from 'jsonwebtoken';
 import campaignRoutes from './routes/campaign.routes.js';
+import paymentRoutes from './routes/payment.routes.js';
+import exotelRoutes from './routes/exotel.routes.js';
+import { startMonitor } from './services/callMonitor.service.js';
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -29,6 +32,8 @@ app.use(express.urlencoded({ extended: true })); // Added for form data support 
 import { getDynamicGreeting } from './controllers/dynamic_greeting.controller.js';
 app.get('/api/dynamic-greeting', getDynamicGreeting);
 app.use('/api/campaigns', campaignRoutes);
+app.use('/api/payment', paymentRoutes);
+app.use('/exotel', exotelRoutes);
 
 
 // Email Configuration
@@ -333,6 +338,102 @@ const initDatabase = async () => {
 
         console.log('✅ Database tables initialized/verified');
 
+        // Optimize Sessions Table with Indices
+        try {
+            console.log('⚡ Optimizing Database Indices...');
+            await pool.query(`CREATE INDEX IF NOT EXISTS idx_sessions_agent_id ON "${getTableName('Sessions')}" (agent_id)`);
+            await pool.query(`CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON "${getTableName('Sessions')}" (started_at)`);
+            console.log('✅ Indices verified');
+        } catch (idxErr) {
+            console.warn('⚠️ Index creation warning:', idxErr.message);
+        }
+
+        // --- NEW BILLING TABLES ---
+        console.log('Checking/Creating Billing Tables...');
+        const paymentTable = getTableName('Payments');
+        const usageTable = getTableName('UsageLogs');
+        const activeCallsTable = getTableName('ActiveCalls');
+        const usersTable = getTableName('Users');
+
+        // Payments
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS "${paymentTable}" (
+                id TEXT PRIMARY KEY,
+                user_id TEXT REFERENCES "${usersTable}"(user_id),
+                amount INTEGER NOT NULL,
+                currency TEXT DEFAULT 'INR',
+                status TEXT,
+                order_id TEXT,
+                payment_id TEXT,
+                type TEXT,
+                minutes_added INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // UsageLogs
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS "${usageTable}" (
+                id TEXT PRIMARY KEY,
+                user_id TEXT REFERENCES "${usersTable}"(user_id),
+                call_sid TEXT,
+                minutes_used NUMERIC DEFAULT 0,
+                direction TEXT,
+                from_number TEXT,
+                to_number TEXT,
+                call_status TEXT,
+                recording_url TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // Add missing columns if table already existed
+        const usageCols = [
+            { name: 'direction', type: 'TEXT' },
+            { name: 'from_number', type: 'TEXT' },
+            { name: 'to_number', type: 'TEXT' },
+            { name: 'call_status', type: 'TEXT' },
+            { name: 'recording_url', type: 'TEXT' },
+        ];
+        for (const col of usageCols) {
+            await pool.query(`ALTER TABLE "${usageTable}" ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}`).catch(() => { });
+        }
+
+        // ActiveCalls
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS "${activeCallsTable}" (
+                call_sid TEXT PRIMARY KEY,
+                user_id TEXT REFERENCES "${usersTable}"(user_id),
+                start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // Update Users with Billing Columns
+        const billingCols = [
+            { name: 'phone_number', type: 'TEXT' },
+            { name: 'subscription_expiry', type: 'TIMESTAMP' },
+            { name: 'minutes_balance', type: 'INTEGER DEFAULT 0' },
+            { name: 'active_lines', type: 'INTEGER DEFAULT 0' },
+            { name: 'last_low_credit_alert', type: 'TIMESTAMP' }
+        ];
+
+        for (const col of billingCols) {
+            try {
+                await pool.query(`ALTER TABLE "${usersTable}" ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}`);
+            } catch (err) {
+                console.error(`Failed to add ${col.name} to Users:`, err.message);
+            }
+        }
+        console.log('✅ Billing Tables & Columns Prepared');
+
+        // Start Monitor
+        startMonitor();
+
         // Seed Default Super Admin
         const adminEmail = 'admin@farmvaidya.ai';
         const adminCheck = await pool.query(`SELECT user_id FROM "${getTableName('Users')}" WHERE email = $1`, [adminEmail]);
@@ -474,14 +575,20 @@ app.post('/api/login', async (req, res) => {
             }
 
             // Check if Creator (Admin) is active
+            // Check if Creator (Admin) is active and subscribed
             if (user.created_by) {
                 const creatorResult = await pool.query(
-                    `SELECT is_active FROM "${getTableName('Users')}" WHERE user_id = $1`,
+                    `SELECT is_active, subscription_expiry FROM "${getTableName('Users')}" WHERE user_id = $1`,
                     [user.created_by]
                 );
                 const creator = creatorResult.rows[0];
-                if (creator && !creator.is_active) {
-                    return res.status(401).json({ success: false, message: 'Organization account is deactivated. Please contact your administrator.' });
+                if (creator) {
+                    if (!creator.is_active) {
+                        return res.status(401).json({ success: false, message: 'Organization account is deactivated. Please contact your administrator.' });
+                    }
+                    if (creator.subscription_expiry && new Date(creator.subscription_expiry) < new Date()) {
+                        return res.status(401).json({ success: false, message: 'Organization subscription has expired. Please contact your administrator.' });
+                    }
                 }
             }
 
@@ -499,6 +606,7 @@ app.post('/api/login', async (req, res) => {
                     username: user.email,
                     email: user.email,
                     role: user.role,
+                    minutes_balance: user.minutes_balance || 0,
                     mustChangePassword: user.must_change_password
                 }
             });
@@ -555,15 +663,24 @@ app.get('/api/me', async (req, res) => {
             }
 
             // Recursive check for creator status
-            if (isEffectiveActive && user.created_by) {
-                const creatorResult = await pool.query(`SELECT is_active, role FROM "${getTableName('Users')}" WHERE user_id = $1`, [user.created_by]);
+            let effectiveBalance = user.minutes_balance || 0;
+
+            if (user.created_by) {
+                const creatorResult = await pool.query(`SELECT is_active, role, minutes_balance, subscription_expiry FROM "${getTableName('Users')}" WHERE user_id = $1`, [user.created_by]);
                 const creator = creatorResult.rows[0];
-                if (creator && !creator.is_active) {
-                    isEffectiveActive = false;
-                    const actor = creator.role === 'admin' ? 'Admin' : 'Super Admin';
-                    // If my creator is an Admin and he got deactivated, it was likely by a Super Admin.
-                    // But for the end user, they just need to know their Admin is down.
-                    deactivationReason = `Your Organization Admin has been deactivated.`;
+                if (creator) {
+                    if (!creator.is_active) {
+                        isEffectiveActive = false;
+                        deactivationReason = `Your Organization Admin has been deactivated.`;
+                    } else if (creator.subscription_expiry && new Date(creator.subscription_expiry) < new Date()) {
+                        isEffectiveActive = false;
+                        deactivationReason = `Organization subscription has expired.`;
+                    }
+
+                    // Balance Inheritance
+                    if (user.role === 'user') {
+                        effectiveBalance = creator.minutes_balance || 0;
+                    }
                 }
             }
 
@@ -574,7 +691,11 @@ app.get('/api/me', async (req, res) => {
                     email: user.email,
                     role: user.role,
                     isActive: isEffectiveActive,
-                    deactivationReason: deactivationReason
+                    deactivationReason: deactivationReason,
+                    minutes_balance: effectiveBalance,
+                    subscription_expiry: user.subscription_expiry, // Keep original or inherit? Usually User doesn't have expiry, Admin does.
+                    created_by: user.created_by,
+                    mustChangePassword: user.must_change_password
                 }
             });
         } else {
@@ -776,10 +897,8 @@ app.get('/api/agents', async (req, res) => {
 
         const countTotalQuery = `SELECT COUNT(a.*) ${baseQuery} ${whereSql}`;
 
-        const [dataResult, countResult] = await Promise.all([
-            pool.query(dataQuery, [...params, limit, offset]),
-            pool.query(countTotalQuery, params)
-        ]);
+        const countResult = await pool.query(countTotalQuery, params);
+        const dataResult = await pool.query(dataQuery, [...params, limit, offset]);
 
         const agents = dataResult.rows.map(row => ({
             ...row,
@@ -846,13 +965,31 @@ app.get('/api/agents/:agentId', async (req, res) => {
     }
 });
 
-// Get Stats (Global) - Cached
-let statsCache = null;
-let statsCacheTime = 0;
-const STATS_CACHE_DURATION = 30000;
-
+// Get Stats (Global/Personalized)
 app.get('/api/stats', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'No token' });
+
+    const token = authHeader.split(' ')[1];
+    let requesterId = null;
+    let isMaster = false;
+
     try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        requesterId = decoded.userId;
+        isMaster = decoded.isMaster && requesterId === 'master_root_0';
+    } catch (err) {
+        return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+
+    try {
+        let userRole = 'user';
+        if (isMaster) {
+            userRole = 'super_admin';
+        } else {
+            const userRes = await pool.query(`SELECT role FROM "${getTableName('Users')}" WHERE user_id = $1`, [requesterId]);
+            if (userRes.rows[0]) userRole = userRes.rows[0].role;
+        }
         const now = Date.now();
 
         // Extract user identity from JWT token
@@ -949,13 +1086,90 @@ app.get('/api/stats', async (req, res) => {
             pool.query(`SELECT COUNT(*) FROM "${getTableName('Agents')}" WHERE is_hidden = TRUE`)
         ]);
 
-        const totalAgents = parseInt(agentsRes.rows[0].count);
-        const totalSessions = parseInt(sessionsRes.rows[0].count);
-        const completedSessions = parseInt(completedRes.rows[0].count);
-        const totalDuration = parseInt(durationRes.rows[0].total_duration || 0);
-        const hiddenAgents = parseInt(hiddenAgentsRes.rows[0].count || 0);
+        let queries = [];
 
-        statsCache = {
+        if (userRole === 'super_admin') {
+            // Global Stats for Super Admin
+            queries = [
+                pool.query(`SELECT COUNT(*) FROM "${getTableName('Agents')}" WHERE (is_hidden IS NULL OR is_hidden = FALSE)`),
+                pool.query(`
+                    SELECT COUNT(s.*) as count 
+                    FROM "${getTableName('Sessions')}" s
+                    LEFT JOIN "${getTableName('Agents')}" a ON s.agent_id = a.agent_id
+                    WHERE (s.is_hidden IS NULL OR s.is_hidden = FALSE) 
+                    AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
+                `),
+                pool.query(`
+                    SELECT COUNT(s.*) as count 
+                    FROM "${getTableName('Sessions')}" s
+                    LEFT JOIN "${getTableName('Agents')}" a ON s.agent_id = a.agent_id
+                    WHERE s.status = 'HTTP_COMPLETED' 
+                    AND (s.is_hidden IS NULL OR s.is_hidden = FALSE)
+                    AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
+                `),
+                pool.query(`
+                    SELECT SUM(s.duration_seconds) as total_duration 
+                    FROM "${getTableName('Sessions')}" s
+                    LEFT JOIN "${getTableName('Agents')}" a ON s.agent_id = a.agent_id
+                    WHERE (s.is_hidden IS NULL OR s.is_hidden = FALSE)
+                    AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
+                    AND s.started_at >= '2026-01-01'
+                `),
+                pool.query(`SELECT COUNT(*) FROM "${getTableName('Agents')}" WHERE is_hidden = TRUE`)
+            ];
+        } else {
+            // Filtered Stats for Admin/User
+            queries = [
+                pool.query(`
+                    SELECT COUNT(a.*) 
+                    FROM "${getTableName('Agents')}" a
+                    INNER JOIN "${getTableName('User_Agents')}" ua ON a.agent_id = ua.agent_id
+                    WHERE ua.user_id = $1
+                    AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
+                `, [requesterId]),
+                pool.query(`
+                    SELECT COUNT(s.*) as count 
+                    FROM "${getTableName('Sessions')}" s
+                    INNER JOIN "${getTableName('Agents')}" a ON s.agent_id = a.agent_id
+                    INNER JOIN "${getTableName('User_Agents')}" ua ON a.agent_id = ua.agent_id
+                    WHERE ua.user_id = $1
+                    AND (s.is_hidden IS NULL OR s.is_hidden = FALSE) 
+                    AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
+                `, [requesterId]),
+                pool.query(`
+                    SELECT COUNT(s.*) as count 
+                    FROM "${getTableName('Sessions')}" s
+                    INNER JOIN "${getTableName('Agents')}" a ON s.agent_id = a.agent_id
+                    INNER JOIN "${getTableName('User_Agents')}" ua ON a.agent_id = ua.agent_id
+                    WHERE ua.user_id = $1
+                    AND s.status = 'HTTP_COMPLETED' 
+                    AND (s.is_hidden IS NULL OR s.is_hidden = FALSE)
+                    AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
+                `, [requesterId]),
+                pool.query(`
+                    SELECT SUM(s.duration_seconds) as total_duration 
+                    FROM "${getTableName('Sessions')}" s
+                    INNER JOIN "${getTableName('Agents')}" a ON s.agent_id = a.agent_id
+                    INNER JOIN "${getTableName('User_Agents')}" ua ON a.agent_id = ua.agent_id
+                    WHERE ua.user_id = $1
+                    AND (s.is_hidden IS NULL OR s.is_hidden = FALSE)
+                    AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
+                    AND s.started_at >= '2026-01-01'
+                `, [requesterId]),
+                // Hidden agents - restricted visibility or just 0
+                pool.query(`SELECT 0 as count`)
+            ];
+        }
+
+        const [agentsRes, sessionsRes, completedRes, durationRes, hiddenAgentsRes] = await Promise.all(queries);
+
+        const totalAgents = parseInt(agentsRes.rows[0].count || 0);
+        const totalSessions = parseInt(sessionsRes.rows[0].count || 0);
+        const completedSessions = parseInt(completedRes.rows[0].count || 0);
+        const totalDuration = parseInt(durationRes.rows[0].total_duration || 0);
+        const hiddenAgents = parseInt(hiddenAgentsRes?.rows?.[0]?.count || 0);
+
+        const stats = {
             totalAgents,
             totalSessions,
             totalDuration,
@@ -964,9 +1178,8 @@ app.get('/api/stats', async (req, res) => {
                 agents: hiddenAgents
             }
         };
-        statsCacheTime = now;
 
-        res.json(statsCache);
+        res.json(stats);
     } catch (error) {
         console.error("Error fetching stats:", error);
         res.status(500).json({ error: error.message });
@@ -1032,16 +1245,27 @@ app.get('/api/sessions', async (req, res) => {
         query += ` ORDER BY s."${sortBy}" ${dbSortOrder} LIMIT $${paramCount + 1} OFFSET $${paramCount + 2} `;
         params.push(limitNum, offset);
 
-        const [dataRes, countRes, agentStatsRes] = await Promise.all([
+        const [dataRes, countRes] = await Promise.all([
             pool.query(query, params),
-            pool.query(countQuery, params.slice(0, paramCount)),
-            pool.query(agentStatsQuery, [agent_id])
+            pool.query(countQuery, params.slice(0, paramCount))
         ]);
 
-        const totalAgentSessions = parseInt(agentStatsRes.rows[0].total_sessions || 0);
-        const successAgentSessions = parseInt(agentStatsRes.rows[0].success_sessions || 0);
-        const zeroTurnSessions = parseInt(agentStatsRes.rows[0].zero_turn_sessions || 0);
-        const totalDuration = parseInt(agentStatsRes.rows[0].total_duration || 0);
+        let totalAgentSessions = 0;
+        let successAgentSessions = 0;
+        let zeroTurnSessions = 0;
+        let totalDuration = 0;
+
+        try {
+            const agentStatsRes = await pool.query(agentStatsQuery, [agent_id]);
+            if (agentStatsRes.rows.length > 0) {
+                totalAgentSessions = parseInt(agentStatsRes.rows[0].total_sessions || 0);
+                successAgentSessions = parseInt(agentStatsRes.rows[0].success_sessions || 0);
+                zeroTurnSessions = parseInt(agentStatsRes.rows[0].zero_turn_sessions || 0);
+                totalDuration = parseInt(agentStatsRes.rows[0].total_duration || 0);
+            }
+        } catch (err) {
+            console.error('Failed to fetch agent stats (ignoring to keep page alive):', err.message);
+        }
 
         res.json({
             data: dataRes.rows,
@@ -2835,6 +3059,45 @@ app.post('/api/telephony/call', async (req, res) => {
             return res.status(400).json({ error: 'Missing call details' });
         }
 
+        const token = authHeader.split(' ')[1];
+        let requesterId = null;
+        try {
+            const decoded = jwt.verify(token, JWT_SECRET);
+            requesterId = decoded.userId;
+        } catch (err) {
+            return res.status(401).json({ error: 'Invalid token' });
+        }
+
+        // Check Credit Balance
+        // Check Credit Balance
+        const userRes = await pool.query(`SELECT minutes_balance, role, created_by, subscription_expiry, is_active FROM "${getTableName('Users')}" WHERE user_id = $1`, [requesterId]);
+        const user = userRes.rows[0];
+
+        if (!user) return res.status(401).json({ error: 'User not found' });
+
+        let billableUser = user;
+
+        if (user.role === 'user' && user.created_by) {
+            const parentRes = await pool.query(`SELECT minutes_balance, subscription_expiry, is_active FROM "${getTableName('Users')}" WHERE user_id = $1`, [user.created_by]);
+            if (parentRes.rows[0]) {
+                billableUser = parentRes.rows[0];
+            }
+        }
+
+        // Check Subscription and Balance (Only for Admin and User roles)
+        const isExempt = user.role === 'super_admin' || requesterId === 'master_root_0';
+
+        if (!isExempt) {
+            if (!billableUser.is_active) return res.status(403).json({ error: 'Account deactivated' });
+            if (billableUser.subscription_expiry && new Date(billableUser.subscription_expiry) < new Date()) {
+                return res.status(403).json({ error: 'Subscription expired' });
+            }
+
+            if ((billableUser.minutes_balance || 0) <= 0) {
+                return res.status(403).json({ error: 'Insufficient call credits (Organization Balance Empty). Please contact admin.' });
+            }
+        }
+
         // 1. Get Config
         const configResult = await pool.query(`SELECT * FROM "${getTableName('Agent_Telephony_Config')}" WHERE agent_id = $1`, [agentId]);
         const config = configResult.rows[0];
@@ -2878,9 +3141,23 @@ app.post('/api/telephony/call', async (req, res) => {
         const numbers = Array.isArray(receiverNumber) ? receiverNumber : [receiverNumber];
         const names = Array.isArray(receiverName) ? receiverName : [receiverName]; // Handle names array if provided
 
+        const recordActiveCall = async (sid) => {
+            if (!sid) return;
+            try {
+                await pool.query(
+                    `INSERT INTO "${getTableName('ActiveCalls')}" (call_sid, user_id, start_time, created_at, updated_at) VALUES ($1, $2, NOW(), NOW(), NOW())`,
+                    [sid, requesterId]
+                );
+            } catch (err) {
+                console.error('Failed to record active call:', err);
+            }
+        };
+
         if (numbers.length === 1) {
             // Single Call (Maintain legacy response format for compatibility)
             const response = await initiateSingleCall(numbers[0], names[0]);
+            const sid = response.data?.Call?.Sid;
+            await recordActiveCall(sid);
             return res.json({ success: true, data: response.data });
         } else {
             // Bulk Call - Line-aware sequential processing
@@ -2909,6 +3186,11 @@ app.post('/api/telephony/call', async (req, res) => {
                 lines: callsLines
             });
 
+            // Execute calls sequentially in the background
+            (async () => {
+                const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+                let successCount = 0;
+                let failCount = 0;
             // Execute calls in batches respecting line limits
             const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
             let successCount = 0;
@@ -2939,7 +3221,24 @@ app.post('/api/telephony/call', async (req, res) => {
                 }
             }
 
-            console.log(`📊 Bulk call complete: ${successCount} success, ${failCount} failed out of ${numbers.length}`);
+                for (let i = 0; i < numbers.length; i++) {
+                    try {
+                        const response = await initiateSingleCall(numbers[i], names[i] || '');
+                        const sid = response.data?.Call?.Sid;
+                        await recordActiveCall(sid);
+                        successCount++;
+                        console.log(`✅ Call ${i + 1}/${numbers.length} to ${numbers[i]} - SUCCESS (SID: ${sid})`);
+                    } catch (callErr) {
+                        failCount++;
+                        console.error(`❌ Call ${i + 1}/${numbers.length} to ${numbers[i]} - FAILED:`, callErr.response?.data?.RestException?.Message || callErr.message);
+                    }
+                    // Wait 10 seconds before the next call (skip wait after the last one)
+                    if (i < numbers.length - 1) {
+                        await sleep(10000);
+                    }
+                }
+                console.log(`📊 Bulk call complete: ${successCount} success, ${failCount} failed out of ${numbers.length}`);
+            })();
         }
 
     } catch (err) {
