@@ -93,10 +93,10 @@ export default function AgentDetails() {
     }, [agentId]);
 
     useEffect(() => {
-        if (agentId) {
+        if (isAdmin || user?.role === 'super_admin' || user?.id === 'master_root_0') {
             fetchTelephonyConfig();
         }
-    }, [fetchTelephonyConfig, agentId]);
+    }, [fetchTelephonyConfig, isAdmin, user]);
 
     const handleSaveConfig = async () => {
         try {
@@ -664,20 +664,10 @@ export default function AgentDetails() {
                                     background: telephonyConfig ? '#22c55e' : '#f1f5f9',
                                     color: telephonyConfig ? 'white' : '#94a3b8',
                                     border: telephonyConfig ? 'none' : '1px solid #cbd5e1',
-                                    cursor: (telephonyConfig && ((user?.minutes_balance > 0) || (user?.role === 'super_admin' || user?.id === 'master_root_0'))) ? 'pointer' : 'not-allowed',
-                                    marginBottom: '0',
-                                    opacity: (telephonyConfig && ((user?.minutes_balance > 0) || (user?.role === 'super_admin' || user?.id === 'master_root_0'))) ? 1 : 0.6
+                                    cursor: telephonyConfig ? 'pointer' : 'not-allowed',
+                                    marginBottom: '0'
                                 }}
-                                onClick={() => {
-                                    const isExempt = user?.role === 'super_admin' || user?.id === 'master_root_0';
-                                    if (!telephonyConfig) {
-                                        toast.error('Telephony not configured for this agent. Please ask an Admin to configure it first.');
-                                    } else if (!isExempt && (user?.minutes_balance || 0) <= 0) {
-                                        toast.error('Insufficient credits! Please recharge to make calls.');
-                                    } else {
-                                        setShowCallModal(true);
-                                    }
-                                }}
+                                onClick={() => telephonyConfig ? setShowCallModal(true) : toast.error('Telephony not configured for this agent. Please ask an Admin to configure it first.')}
                             >
                                 <Phone size={18} /> Send Call
                             </button>

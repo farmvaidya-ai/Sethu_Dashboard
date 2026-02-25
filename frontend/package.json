@@ -22,7 +22,6 @@
     "multer": "^2.0.2",
     "nodemailer": "^7.0.13",
     "pg": "^8.17.2",
-    "razorpay": "^2.9.6",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-hot-toast": "^2.6.0",
