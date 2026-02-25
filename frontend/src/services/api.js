@@ -117,6 +117,7 @@ export const paymentAPI = {
     adjustCredits: (amount, targetUserId) => api.post('/api/payment/adjust-credits', { amount, targetUserId })
 };
 
+
 // Settings APIs
 export const settingsAPI = {
     getSettings: () => api.get('/api/settings'),

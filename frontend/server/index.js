@@ -991,6 +991,7 @@ app.get('/api/stats', async (req, res) => {
             if (userRes.rows[0]) userRole = userRes.rows[0].role;
         }
 
+
         let queries = [];
 
         if (userRole === 'super_admin') {
@@ -3216,7 +3217,6 @@ app.post('/api/telephony/call', async (req, res) => {
                         await sleep(callInterval * 1000);
                     }
                 }
-
                 console.log(`📊 Bulk call complete: ${successCount} success, ${failCount} failed out of ${numbers.length}`);
             })();
         }
