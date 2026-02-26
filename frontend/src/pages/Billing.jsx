@@ -43,6 +43,7 @@ const Billing = () => {
     const transactionsLimit = 10;
 
     const fetchTransactions = async () => {
+        setProcessing(true);
         try {
             const response = await paymentAPI.getTransactionHistory('payments', transactionsPage, transactionsLimit);
             if (response.data.success) {
@@ -51,6 +52,9 @@ const Billing = () => {
             }
         } catch (error) {
             console.error('Failed to fetch transactions:', error);
+            toast.error('Could not load billing history');
+        } finally {
+            setProcessing(false);
         }
     };
 
