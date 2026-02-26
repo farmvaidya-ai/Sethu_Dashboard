@@ -252,6 +252,7 @@ async function updateUser(req, res) {
         if (role) updates.role = role;
         if (subscriptionTier) updates.subscription_tier = subscriptionTier;
         if (isActive !== undefined) updates.is_active = isActive;
+        if (req.body.low_balance_threshold !== undefined) updates.low_balance_threshold = req.body.low_balance_threshold;
 
         await user.update(updates);
 

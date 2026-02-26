@@ -1,5 +1,6 @@
 import 'dotenv/config';
-// process.env.APP_ENV = 'test'; // Force test mode removed for production deployment
+import crypto from 'crypto';
+
 console.log('🌍 Setting up environment:', process.env.APP_ENV);
 console.log('🔑 Azure Key Configured:', !!process.env.AZURE_OPENAI_API_KEY);
 console.log('📍 Azure Endpoint:', process.env.AZURE_OPENAI_ENDPOINT);
@@ -15,8 +16,8 @@ import jwt from 'jsonwebtoken';
 import campaignRoutes from './routes/campaign.routes.js';
 import paymentRoutes from './routes/payment.routes.js';
 import exotelRoutes from './routes/exotel.routes.js';
+import notificationsRoutes from './routes/notifications.routes.js';
 import { startMonitor } from './services/callMonitor.service.js';
-
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -24,15 +25,31 @@ const DATA_FILE = path.join(__dirname, 'users.json');
 
 const { Pool } = pg;
 const app = express();
-app.use(cors());
+
+// --- Secure CORS (restrict to FRONTEND_URL in production) ---
+const allowedOrigins = process.env.FRONTEND_URL
+    ? [process.env.FRONTEND_URL, 'http://localhost:5173']
+    : ['http://localhost:5173', 'http://localhost:3000'];
+app.use(cors({
+    origin: (origin, callback) => {
+        if (!origin || allowedOrigins.some(o => origin.startsWith(o))) {
+            callback(null, true);
+        } else {
+            callback(new Error(`CORS: origin ${origin} not allowed`));
+        }
+    },
+    credentials: true
+}));
+
 app.use(express.json());
-app.use(express.urlencoded({ extended: true })); // Added for form data support if needed
+app.use(express.urlencoded({ extended: true }));
 
 // Mount Campaign Routes
 import { getDynamicGreeting } from './controllers/dynamic_greeting.controller.js';
 app.get('/api/dynamic-greeting', getDynamicGreeting);
 app.use('/api/campaigns', campaignRoutes);
 app.use('/api/payment', paymentRoutes);
+app.use('/api/notifications', notificationsRoutes);
 app.use('/exotel', exotelRoutes);
 
 
@@ -150,8 +167,25 @@ const getTableName = (baseTableName) => {
 console.log(`📊 Frontend API Environment: ${APP_ENV}`);
 console.log(`📋 Tables: ${getTableName('Agents')}, ${getTableName('Sessions')}, ${getTableName('Conversations')}, ${getTableName('Users')}, ${getTableName('User_Agents')}`);
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-default-dev-secret-do-not-use-in-prod';
+// --- JWT Secret Guard ---
+const _RAW_JWT_SECRET = process.env.JWT_SECRET;
+if (!_RAW_JWT_SECRET) {
+    if (APP_ENV === 'production') {
+        console.error('❌ FATAL: JWT_SECRET environment variable is not set. Refusing to start in production.');
+        process.exit(1);
+    } else {
+        console.warn('⚠️  WARNING: JWT_SECRET not set. Using insecure dev default. DO NOT use in production!');
+    }
+}
+const JWT_SECRET_ACTIVE = _RAW_JWT_SECRET || 'dev-insecure-secret-do-not-use-in-production-12345';
 
+// --- Secure Random Password Generator (no bcrypt needed) ---
+const generateTempPassword = () => {
+    const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789@#!';
+    return Array.from(crypto.randomBytes(12))
+        .map(b => chars[b % chars.length])
+        .join('');
+};
 
 // --- DATABASE TABLES INITIALIZATION ---
 const initDatabase = async () => {
@@ -402,6 +436,20 @@ const initDatabase = async () => {
             await pool.query(`ALTER TABLE "${usageTable}" ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}`).catch(() => { });
         }
 
+        // Notifications
+        const notificationsTable = getTableName('Notifications');
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS "${notificationsTable}" (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT REFERENCES "${usersTable}"(user_id),
+                type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                is_read BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `).catch(err => console.error(`Error creating Notifications table:`, err.message));
+
         // ActiveCalls
         await pool.query(`
             CREATE TABLE IF NOT EXISTS "${activeCallsTable}" (
@@ -413,13 +461,13 @@ const initDatabase = async () => {
             )
         `);
 
-        // Update Users with Billing Columns
         const billingCols = [
             { name: 'phone_number', type: 'TEXT' },
             { name: 'subscription_expiry', type: 'TIMESTAMP' },
             { name: 'minutes_balance', type: 'INTEGER DEFAULT 0' },
             { name: 'active_lines', type: 'INTEGER DEFAULT 0' },
-            { name: 'last_low_credit_alert', type: 'TIMESTAMP' }
+            { name: 'last_low_credit_alert', type: 'TIMESTAMP' },
+            { name: 'low_balance_threshold', type: 'INTEGER DEFAULT 50' }
         ];
 
         for (const col of billingCols) {
@@ -544,7 +592,7 @@ app.post('/api/login', async (req, res) => {
                     role: 'super_admin',
                     isMaster: true  // Special flag
                 },
-                JWT_SECRET,
+                JWT_SECRET_ACTIVE,
                 { expiresIn: '24h' }
             );
 
@@ -594,7 +642,7 @@ app.post('/api/login', async (req, res) => {
 
             const token = jwt.sign(
                 { userId: user.user_id, email: user.email, role: user.role },
-                JWT_SECRET,
+                JWT_SECRET_ACTIVE,
                 { expiresIn: '24h' }
             );
 
@@ -627,7 +675,7 @@ app.get('/api/me', async (req, res) => {
     let userId = null;
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         userId = decoded.userId;
 
         if (decoded.isMaster && userId === 'master_root_0') {
@@ -720,7 +768,7 @@ app.post('/api/change-password', async (req, res) => {
     let userId = null;
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         userId = decoded.userId;
     } catch (err) {
         return res.status(401).json({ error: 'Invalid or expired token' });
@@ -831,7 +879,7 @@ app.get('/api/agents', async (req, res) => {
     let isMaster = false; // Add master tracking
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         requesterId = decoded.userId;
         isMaster = decoded.isMaster && requesterId === 'master_root_0';
     } catch (err) {
@@ -932,7 +980,7 @@ app.get('/api/agents/:agentId', async (req, res) => {
     let isMaster = false;
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         requesterId = decoded.userId;
         isMaster = decoded.isMaster && requesterId === 'master_root_0';
     } catch (err) {
@@ -975,7 +1023,7 @@ app.get('/api/stats', async (req, res) => {
     let isMaster = false;
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         requesterId = decoded.userId;
         isMaster = decoded.isMaster && requesterId === 'master_root_0';
     } catch (err) {
@@ -1102,7 +1150,7 @@ app.get('/api/active-sessions', async (req, res) => {
     let isMaster = false;
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         requesterId = decoded.userId;
         isMaster = decoded.isMaster && requesterId === 'master_root_0';
     } catch (err) {
@@ -1488,7 +1536,7 @@ app.get('/api/users', async (req, res) => {
     let isMaster = false;
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         requesterId = decoded.userId;
         isMaster = decoded.isMaster && requesterId === 'master_root_0';
     } catch (err) {
@@ -1509,7 +1557,9 @@ app.get('/api/users', async (req, res) => {
         let query = `
             SELECT u.*,
             (SELECT COUNT(*) FROM "${getTableName('User_Agents')}" ua WHERE ua.user_id = u.user_id) as agent_count,
-    creator.email as creator_email
+    creator.email as creator_email,
+    creator.subscription_expiry as creator_subscription_expiry,
+    creator.minutes_balance as creator_minutes_balance
             FROM "${getTableName('Users')}" u
             LEFT JOIN "${getTableName('Users')}" creator ON u.created_by = creator.user_id
     `;
@@ -1572,6 +1622,11 @@ app.get('/api/users', async (req, res) => {
         }
 
         for (let user of users) {
+            if (user.role === 'user' && user.created_by) {
+                user.subscription_expiry = user.creator_subscription_expiry;
+                user.minutes_balance = user.creator_minutes_balance;
+            }
+
             if (user.role === 'super_admin') {
                 user.agents = allAgentIds;
                 user.agentCount = allAgentIds.length;
@@ -1634,7 +1689,7 @@ app.post('/api/users', async (req, res) => {
     let requesterId = null;
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         requesterId = decoded.userId;
     } catch (err) {
         if (err.name === 'JsonWebTokenError' || err.name === 'TokenExpiredError') {
@@ -1643,16 +1698,16 @@ app.post('/api/users', async (req, res) => {
         return res.status(500).json({ error: `Server authentication error (POST /api/users): ${err.message}` });
     }
 
-    const { email, role, subscriptionTier, agents } = req.body;
+    const { email, role, subscriptionTier, agents, subscription_expiry, minutes_balance } = req.body;
     const user_id = `user_${Date.now()}`;
-    const password = 'Password123!';
+    const password = generateTempPassword(); // Cryptographically random, unique per user
 
     try {
         let reqUser;
         if (requesterId === 'master_root_0') {
             reqUser = { role: 'super_admin' };
         } else {
-            const reqUserRes = await pool.query(`SELECT role FROM "${getTableName('Users')}" WHERE user_id = $1`, [requesterId]);
+            const reqUserRes = await pool.query(`SELECT role, minutes_balance FROM "${getTableName('Users')}" WHERE user_id = $1`, [requesterId]);
             reqUser = reqUserRes.rows[0];
         }
 
@@ -1666,13 +1721,56 @@ app.post('/api/users', async (req, res) => {
             return res.status(403).json({ error: 'Users cannot create other users.' });
         }
 
+        let userSubExpiry = null;
+        let userMinBalance = 0;
+
+        if (reqUser.role === 'super_admin' && role !== 'user') {
+            if (subscription_expiry) userSubExpiry = new Date(subscription_expiry);
+            if (minutes_balance) userMinBalance = parseInt(minutes_balance, 10) || 0;
+        }
+
+        // User Limit Check & Credit Deduction
+        if (requesterId !== 'master_root_0') {
+            const userCountRes = await pool.query(`SELECT COUNT(*) FROM "${getTableName('Users')}" WHERE created_by = $1`, [requesterId]);
+            const createdUserCount = parseInt(userCountRes.rows[0].count);
+
+            if (createdUserCount >= 2) {
+                if (!reqUser.minutes_balance || reqUser.minutes_balance < 500) {
+                    return res.status(402).json({ error: 'User limit reached. You need 500 credits to create an additional user. Please recharge.' });
+                }
+
+                // Deduct 500 Credits
+                await pool.query(
+                    `UPDATE "${getTableName('Users')}" SET minutes_balance = minutes_balance - 500, updated_at = NOW() WHERE user_id = $1`,
+                    [requesterId]
+                );
+                console.log(`💰 Deducted 500 credits from ${requesterId} for creating user above limit (has ${createdUserCount} users).`);
+            }
+        }
+
+        // Agent Assignment Constraint Check (Only one Admin can own an Agent)
+        if (role === 'admin' && agents && agents.length > 0) {
+            for (const agentId of agents) {
+                const constraintCheck = await pool.query(`
+                    SELECT u.email 
+                    FROM "${getTableName('User_Agents')}" ua
+                    JOIN "${getTableName('Users')}" u ON ua.user_id = u.user_id
+                    WHERE ua.agent_id = $1 AND u.role IN ('admin', 'super_admin') AND ua.user_id != $2
+                `, [agentId, user_id]);
+
+                if (constraintCheck.rows.length > 0) {
+                    return res.status(400).json({ error: `Agent ${agentId} is already assigned to Admin ${constraintCheck.rows[0].email}` });
+                }
+            }
+        }
+
         console.log(`👤 Creating user: ${email} (Role: ${role}, Created by: ${requesterId})`);
         // Create User
         await pool.query(`
             INSERT INTO "${getTableName('Users')}"
-    (user_id, email, password_hash, role, subscription_tier, is_active, must_change_password, created_by, created_at, updated_at)
-VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-    `, [user_id, email, password, role || 'user', subscriptionTier || 'free', true, true, requesterId, new Date(), new Date()]);
+    (user_id, email, password_hash, role, subscription_tier, is_active, must_change_password, created_by, created_at, updated_at, subscription_expiry, minutes_balance)
+VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    `, [user_id, email, password, role || 'user', subscriptionTier || 'free', true, true, requesterId, new Date(), new Date(), userSubExpiry, userMinBalance]);
 
         // Assign Agents
         if (agents && agents.length > 0) {
@@ -1716,7 +1814,7 @@ VALUES($1, $2)
 // Update User (Role, Subscription, etc.)
 app.put('/api/users/:userId', async (req, res) => {
     const { userId } = req.params;
-    const { role, subscriptionTier, isActive } = req.body;
+    const { role, subscriptionTier, isActive, subscription_expiry, minutes_balance } = req.body;
     const authHeader = req.headers.authorization;
     if (!authHeader) return res.status(401).json({ error: 'No token' });
 
@@ -1724,7 +1822,7 @@ app.put('/api/users/:userId', async (req, res) => {
     let requesterId = null;
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         requesterId = decoded.userId;
     } catch (err) {
         if (err.name === 'JsonWebTokenError' || err.name === 'TokenExpiredError') {
@@ -1779,6 +1877,16 @@ app.put('/api/users/:userId', async (req, res) => {
             updates.push(`is_active = $${params.length + 1} `);
             params.push(isActive);
         }
+        if (reqUser.role === 'super_admin' && role !== 'user') {
+            if (subscription_expiry !== undefined) {
+                updates.push(`subscription_expiry = $${params.length + 1} `);
+                params.push(subscription_expiry ? new Date(subscription_expiry) : null);
+            }
+            if (minutes_balance !== undefined) {
+                updates.push(`minutes_balance = $${params.length + 1} `);
+                params.push(parseInt(minutes_balance, 10) || 0);
+            }
+        }
 
         updates.push(`updated_at = $${params.length + 1} `);
         params.push(new Date());
@@ -1804,7 +1912,7 @@ app.post('/api/users/:userId/agents', async (req, res) => {
     if (!authHeader) return res.status(401).json({ error: 'No token' });
 
     try {
-        jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+        jwt.verify(authHeader.split(' ')[1], JWT_SECRET_ACTIVE);
     } catch (err) {
         return res.status(401).json({ error: 'Invalid or expired token' });
     }
@@ -1831,7 +1939,7 @@ app.put('/api/users/:userId/agents', async (req, res) => {
     if (!authHeader) return res.status(401).json({ error: 'No token' });
 
     try {
-        jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+        jwt.verify(authHeader.split(' ')[1], JWT_SECRET_ACTIVE);
     } catch (err) {
         return res.status(401).json({ error: 'Invalid or expired token' });
     }
@@ -1842,6 +1950,25 @@ app.put('/api/users/:userId/agents', async (req, res) => {
         await pool.query(`DELETE FROM "${getTableName('User_Agents')}" WHERE user_id = $1`, [userId]);
 
         if (agents && agents.length > 0) {
+            // Agent Assignment Constraint Check
+            const uRes = await pool.query(`SELECT role FROM "${getTableName('Users')}" WHERE user_id = $1`, [userId]);
+            const targetRole = uRes.rows[0]?.role;
+
+            if (targetRole === 'admin' || targetRole === 'super_admin') {
+                for (const agentId of agents) {
+                    const constraintCheck = await pool.query(`
+                        SELECT u.email 
+                        FROM "${getTableName('User_Agents')}" ua
+                        JOIN "${getTableName('Users')}" u ON ua.user_id = u.user_id
+                        WHERE ua.agent_id = $1 AND u.role IN ('admin', 'super_admin') AND ua.user_id != $2
+                    `, [agentId, userId]);
+
+                    if (constraintCheck.rows.length > 0) {
+                        return res.status(400).json({ error: `Agent ${agentId} is already assigned to Admin ${constraintCheck.rows[0].email}` });
+                    }
+                }
+            }
+
             for (const agentId of agents) {
                 await pool.query(`
                     INSERT INTO "${getTableName('User_Agents')}"(user_id, agent_id)
@@ -1867,7 +1994,7 @@ app.delete('/api/users/:userId', async (req, res) => {
     let requesterId = null;
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         requesterId = decoded.userId;
         isMaster = decoded.isMaster && requesterId === 'master_root_0';
     } catch (err) {
@@ -1985,7 +2112,7 @@ app.patch('/api/users/:userId/active', async (req, res) => {
     let requesterId = null;
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         requesterId = decoded.userId;
     } catch (err) {
         if (err.name === 'JsonWebTokenError' || err.name === 'TokenExpiredError') {
@@ -2063,7 +2190,7 @@ app.post('/api/users/:userId/reset-password', async (req, res) => {
     let requesterId = null;
 
     try {
-        const decoded = jwt.verify(tokenFromReq, JWT_SECRET);
+        const decoded = jwt.verify(tokenFromReq, JWT_SECRET_ACTIVE);
         requesterId = decoded.userId;
     } catch (err) {
         if (err.name === 'JsonWebTokenError' || err.name === 'TokenExpiredError') {
@@ -2170,7 +2297,7 @@ app.get('/api/user/dashboard', async (req, res) => {
     let userId = null;
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         userId = decoded.userId;
     } catch (err) {
         return res.status(401).json({ error: 'Invalid or expired token' });
@@ -2303,7 +2430,7 @@ app.get('/api/users/creators', async (req, res) => {
     if (!authHeader) return res.status(401).json({ error: 'No token' });
 
     try {
-        jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+        jwt.verify(authHeader.split(' ')[1], JWT_SECRET_ACTIVE);
     } catch (err) {
         return res.status(401).json({ error: 'Invalid or expired token' });
     }
@@ -2328,7 +2455,7 @@ app.patch('/api/user/conversations/:sessionId/review-status', async (req, res) =
 
     let userId = null;
     try {
-        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET_ACTIVE);
         userId = decoded.userId;
     } catch (err) {
         return res.status(401).json({ error: 'Invalid or expired token' });
@@ -2457,7 +2584,7 @@ app.post('/api/admin/users/:userId/agents/:agentId/mark-permission', async (req,
 
     let requesterId = null;
     try {
-        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET_ACTIVE);
         requesterId = decoded.userId;
     } catch (err) {
         return res.status(401).json({ error: 'Invalid or expired token' });
@@ -2537,7 +2664,7 @@ app.delete('/api/data-admin/sessions/:sessionId', async (req, res) => {
     if (!authHeader) return res.status(401).json({ error: 'No token' });
 
     try {
-        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET_ACTIVE);
         const isMaster = decoded.isMaster && decoded.userId === 'master_root_0';
 
         if (!isMaster) {
@@ -2581,7 +2708,7 @@ app.delete('/api/data-admin/agents/:agentId', async (req, res) => {
     if (!authHeader) return res.status(401).json({ error: 'No token' });
 
     try {
-        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET_ACTIVE);
         const isMaster = decoded.isMaster && decoded.userId === 'master_root_0';
 
         if (!isMaster) {
@@ -2641,7 +2768,7 @@ app.patch('/api/data-admin/conversations/:sessionId/summary', async (req, res) =
     if (!authHeader) return res.status(401).json({ error: 'No token' });
 
     try {
-        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET_ACTIVE);
         const isMaster = decoded.isMaster && decoded.userId === 'master_root_0';
 
         if (!isMaster) {
@@ -2683,7 +2810,7 @@ app.get('/api/data-admin/excluded', async (req, res) => {
     if (!authHeader) return res.status(401).json({ error: 'No token' });
 
     try {
-        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET_ACTIVE);
         const isMaster = decoded.isMaster && decoded.userId === 'master_root_0';
 
         if (!isMaster) {
@@ -2715,7 +2842,7 @@ app.delete('/api/data-admin/excluded/:itemType/:itemId', async (req, res) => {
     if (!authHeader) return res.status(401).json({ error: 'No token' });
 
     try {
-        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET_ACTIVE);
         const isMaster = decoded.isMaster && decoded.userId === 'master_root_0';
 
         if (!isMaster) {
@@ -2786,7 +2913,7 @@ app.delete('/api/data-admin/excluded-permanent/:itemType/:itemId', async (req, r
     if (!authHeader) return res.status(401).json({ error: 'No token' });
 
     try {
-        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET_ACTIVE);
         const isMaster = decoded.isMaster && decoded.userId === 'master_root_0';
 
         if (!isMaster) {
@@ -2830,7 +2957,7 @@ app.delete('/api/agents/:agentId', async (req, res) => {
     const token = authHeader.split(' ')[1];
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         const isMaster = decoded.isMaster && decoded.userId === 'master_root_0';
 
         let userRole = 'user';
@@ -2885,7 +3012,7 @@ app.post('/api/agents/:agentId/restore', async (req, res) => {
     const token = authHeader.split(' ')[1];
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         const isMaster = decoded.isMaster && decoded.userId === 'master_root_0';
 
         if (!isMaster) return res.status(403).json({ error: 'Only Master Admin can restore agents.' });
@@ -2919,7 +3046,7 @@ app.delete('/api/sessions/:sessionId', async (req, res) => {
     const token = authHeader.split(' ')[1];
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         const isMaster = decoded.isMaster && decoded.userId === 'master_root_0';
 
         let userRole = 'user';
@@ -2967,7 +3094,7 @@ app.post('/api/sessions/:sessionId/restore', async (req, res) => {
     const token = authHeader.split(' ')[1];
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         const isMaster = decoded.isMaster && decoded.userId === 'master_root_0';
 
         if (!isMaster) return res.status(403).json({ error: 'Only Master Admin can restore sessions.' });
@@ -3006,7 +3133,7 @@ app.post('/api/telephony/config', async (req, res) => {
     if (!authHeader) return res.status(401).json({ error: 'No token' });
     try {
         const token = authHeader.split(' ')[1];
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         // Allow Master Root or Super Admin or Admin
         if (!decoded.role && !decoded.isMaster) return res.status(403).json({ error: 'Access denied' });
 
@@ -3061,7 +3188,7 @@ app.post('/api/telephony/call', async (req, res) => {
         const token = authHeader.split(' ')[1];
         let requesterId = null;
         try {
-            const decoded = jwt.verify(token, JWT_SECRET);
+            const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
             requesterId = decoded.userId;
         } catch (err) {
             return res.status(401).json({ error: 'Invalid token' });
@@ -3306,14 +3433,14 @@ app.get('/api/proxy-recording', async (req, res) => {
 });
 
 // Serve static files from the React app
-
 const distPath = path.join(__dirname, '../dist');
 if (fs.existsSync(distPath)) {
     app.use(express.static(distPath));
-    // Handle SPA routing - use regex for Express 5 compatibility
-    app.get(/^(?!\/api).*$/, (req, res) => {
+    // Catch-all for SPA routing - exclude API and Exotel routes
+    app.get(/^(?!\/api|\/exotel).*$/, (req, res) => {
         res.sendFile(path.join(distPath, 'index.html'));
     });
+    console.log(`📦 Serving production React build from: ${distPath}`);
 } else {
     console.warn('⚠️ dist folder not found. Frontend will not be served statically.');
 }
@@ -3325,7 +3452,7 @@ app.get('/api/system/status', async (req, res) => {
     const token = authHeader.split(' ')[1];
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         // Strict Master Check
         if (!decoded.isMaster || decoded.userId !== 'master_root_0') {
             return res.status(403).json({ error: 'Access denied' });
@@ -3381,7 +3508,7 @@ app.get('/api/settings', async (req, res) => {
     const token = authHeader.split(' ')[1];
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         const requesterId = decoded.userId;
         const isMaster = decoded.isMaster && requesterId === 'master_root_0';
 
@@ -3418,7 +3545,7 @@ app.put('/api/settings', async (req, res) => {
     const token = authHeader.split(' ')[1];
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         const requesterId = decoded.userId;
         const isMaster = decoded.isMaster && requesterId === 'master_root_0';
         let updatedBy = 'master';
@@ -3495,5 +3622,5 @@ app.get('/api/settings/throttle', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
     await initDatabase();
-    console.log(`Server running on port ${PORT} `);
+    console.log(`✅ Server running on port ${PORT} (${APP_ENV} mode)`);
 });

@@ -23,8 +23,6 @@ const razorpay = new Razorpay({
 });
 
 const SUBSCRIPTION_AMOUNT = 650000; // 6500 INR in paise
-const MINUTES_RECHARGE_AMOUNT = 350000; // 3500 INR in paise
-const MINUTES_PER_RECHARGE = 1000;
 
 export const createSubscriptionOrder = async (req, res) => {
     try {
@@ -78,9 +76,17 @@ export const createSubscriptionOrder = async (req, res) => {
 export const createRechargeOrder = async (req, res) => {
     try {
         const userId = req.user.userId;
+        const requestedAmount = parseInt(req.body.amount, 10);
+
+        if (!requestedAmount || requestedAmount < 1000) {
+            return res.status(400).json({ success: false, message: 'Minimum recharge amount is ₹1,000' });
+        }
+
+        const amountInPaise = requestedAmount * 100;
+        const creditsToAdd = requestedAmount; // 1:1 ratio for Credits
 
         const options = {
-            amount: MINUTES_RECHARGE_AMOUNT,
+            amount: amountInPaise,
             currency: "INR",
             receipt: `min_${userId}_${Date.now()}`,
             notes: {
@@ -95,13 +101,13 @@ export const createRechargeOrder = async (req, res) => {
             `INSERT INTO "${getTableName('Payments')}" (
                 id, user_id, amount, currency, status, order_id, type, minutes_added, created_at, updated_at
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())`,
-            [crypto.randomUUID(), userId, MINUTES_RECHARGE_AMOUNT, 'INR', 'created', order.id, 'minutes', MINUTES_PER_RECHARGE]
+            [crypto.randomUUID(), userId, amountInPaise, 'INR', 'created', order.id, 'minutes', creditsToAdd]
         );
 
         res.json({
             success: true,
             order_id: order.id,
-            amount: MINUTES_RECHARGE_AMOUNT,
+            amount: amountInPaise,
             key_id: process.env.RAZORPAY_KEY_ID,
             currency: "INR"
         });
@@ -261,7 +267,7 @@ export const getTransactionHistory = async (req, res) => {
         } else if (filter === 'calls') {
             dataQuery = `
                 SELECT 
-                    ul.id, ul.created_at, 'call' as type, 0 as credit_amount, ul.minutes_used as debit_amount, 'debit' as transaction_type,
+                    ul.id, ul.created_at, 'call' as type, 0 as credit_amount, ROUND((ul.minutes_used * 3.5)::numeric, 2) as debit_amount, 'debit' as transaction_type,
                     CASE 
                         WHEN ul.direction = 'inbound' THEN 'Incoming Call'
                         WHEN ul.direction = 'outbound' OR ul.direction IS NULL THEN 'Outgoing Call'
@@ -309,7 +315,7 @@ export const getTransactionHistory = async (req, res) => {
                     UNION ALL
                     
                     SELECT 
-                        ul.id, ul.created_at, 'call' as type, 0 as credit_amount, ul.minutes_used as debit_amount, 'debit' as transaction_type,
+                        ul.id, ul.created_at, 'call' as type, 0 as credit_amount, ROUND((ul.minutes_used * 3.5)::numeric, 2) as debit_amount, 'debit' as transaction_type,
                         CASE 
                             WHEN ul.direction = 'inbound' THEN 'Incoming Call'
                             WHEN ul.direction = 'outbound' THEN 'Outgoing Call'

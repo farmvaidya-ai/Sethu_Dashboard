@@ -11,6 +11,7 @@ const Billing = () => {
     const [balances, setBalances] = useState(null);
     const [loading, setLoading] = useState(true);
     const [processing, setProcessing] = useState(false);
+    const [rechargeAmount, setRechargeAmount] = useState(1000);
 
     const [transactions, setTransactions] = useState([]);
     const [transactionsPage, setTransactionsPage] = useState(1);
@@ -81,7 +82,12 @@ const Billing = () => {
             if (type === 'subscription') {
                 orderResponse = await paymentAPI.createSubscription();
             } else {
-                orderResponse = await paymentAPI.createRecharge();
+                if (rechargeAmount < 1000) {
+                    toast.error("Minimum recharge amount is ₹1,000");
+                    setProcessing(false);
+                    return;
+                }
+                orderResponse = await paymentAPI.createRecharge(rechargeAmount);
             }
 
             const { order_id, amount, key_id, currency } = orderResponse.data;
@@ -91,7 +97,7 @@ const Billing = () => {
                 amount: amount,
                 currency: "INR",
                 name: "FarmVaidya Admin",
-                description: type === 'subscription' ? "Monthly Platform Subscription" : "1000 Minutes Recharge",
+                description: type === 'subscription' ? "Monthly Platform Subscription" : `${amount / 100} Credits Recharge`,
                 order_id: order_id,
                 handler: async function (response) {
                     try {
@@ -284,7 +290,7 @@ const Billing = () => {
                             <Link to="/admin/usage-history" style={{ textDecoration: 'none', display: 'block' }}>
                                 <div style={{ fontSize: '2.5rem', fontWeight: '800', color: (balances?.minutes_balance || 0) <= 0 ? '#ef4444' : 'var(--text)', cursor: 'pointer' }} title="View Usage Ledger">
                                     {balances?.minutes_balance || 0}
-                                    <span style={{ fontSize: '1rem', fontWeight: '500', color: 'var(--text-muted)', marginLeft: '6px' }}>mins</span>
+                                    <span style={{ fontSize: '1rem', fontWeight: '500', color: 'var(--text-muted)', marginLeft: '6px' }}>credits</span>
                                 </div>
                             </Link>
                         </div>
@@ -296,9 +302,22 @@ const Billing = () => {
                             </p>
                         </div>
 
-                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1rem', padding: '0 0.5rem' }}>
-                            <span style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>Top-up Pack</span>
-                            <span style={{ fontSize: '0.9rem', fontWeight: '600' }}>1000 Minutes</span>
+                        <div style={{ marginBottom: '1.5rem', padding: '0 0.5rem' }}>
+                            <label style={{ fontSize: '0.9rem', color: 'var(--text-muted)', display: 'block', marginBottom: '8px' }}>Recharge Amount (₹)</label>
+                            <div style={{ display: 'flex', alignItems: 'center', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '8px', overflow: 'hidden' }}>
+                                <span style={{ padding: '12px 14px', background: 'rgba(0,0,0,0.05)', color: 'var(--text-muted)', fontWeight: 'bold', borderRight: '1px solid var(--border)' }}>₹</span>
+                                <input
+                                    type="number"
+                                    min="1000"
+                                    value={rechargeAmount || ''}
+                                    onChange={(e) => setRechargeAmount(Number(e.target.value))}
+                                    style={{ width: '100%', padding: '12px', border: 'none', background: 'transparent', outline: 'none', fontSize: '1rem', color: 'var(--text)' }}
+                                />
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '6px' }}>
+                                <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: 0 }}>Min: ₹1,000</p>
+                                <p style={{ fontSize: '0.8rem', color: 'var(--primary)', fontWeight: 'bold', margin: 0 }}>={rechargeAmount || 0} Credits</p>
+                            </div>
                         </div>
 
                         <button
@@ -322,10 +341,10 @@ const Billing = () => {
                             }}
                         >
                             {processing ? <div className="spinner-small"></div> : <CreditCard size={18} />}
-                            {processing ? 'Processing...' : 'Recharge ₹3,500'}
+                            {processing ? 'Processing...' : `Recharge ₹${(rechargeAmount || 0).toLocaleString()}`}
                         </button>
                         <p style={{ textAlign: 'center', fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '10px' }}>
-                            Rate: ₹3.5 / minute
+                            Rate: 3.5 credits / minute
                         </p>
                         <Link to="/admin/usage-history" style={{
                             marginTop: '1rem',

@@ -317,10 +317,35 @@ export const handleStatusCallback = async (req, res) => {
                     const isExempt = u.role === 'super_admin' || userId === 'master_root_0';
 
                     if (!isExempt) {
-                        await pool.query(
-                            `UPDATE "${getTableName('Users')}" SET minutes_balance = minutes_balance - $1, updated_at = NOW() WHERE user_id = $2`,
-                            [durationMinutes, billableUserId]
+                        const creditsToDeduct = parseFloat((durationMinutes * 3.5).toFixed(2));
+                        const updateRes = await pool.query(
+                            `UPDATE "${getTableName('Users')}" SET minutes_balance = ROUND((minutes_balance - $1)::numeric, 2), updated_at = NOW() WHERE user_id = $2 RETURNING minutes_balance, low_balance_threshold, email, last_low_credit_alert, role`,
+                            [creditsToDeduct, billableUserId]
                         );
+
+                        if (updateRes.rows.length > 0) {
+                            const adminUser = updateRes.rows[0];
+                            const threshold = adminUser.low_balance_threshold || 50;
+
+                            if (adminUser.minutes_balance <= threshold && adminUser.role !== 'user') {
+                                console.log(`🔔 Low Balance Call Alert triggered for ${adminUser.email} (Balance: ${adminUser.minutes_balance})`);
+
+                                const message = adminUser.minutes_balance <= 0
+                                    ? "You are receiving calls but your balance is zero. Please recharge immediately to avoid service interruption."
+                                    : "You are receiving calls but you are getting low with the balance please recharge.";
+
+                                // Create Notification unconditionally on every call
+                                await pool.query(
+                                    `INSERT INTO "${getTableName('Notifications')}" (user_id, type, title, message) VALUES ($1, $2, $3, $4)`,
+                                    [
+                                        billableUserId,
+                                        'low_balance_call',
+                                        'Call While Balance Low',
+                                        message
+                                    ]
+                                ).catch(err => console.error('Failed to create notification:', err));
+                            }
+                        }
                     }
 
                     // Enhanced Usage Logging

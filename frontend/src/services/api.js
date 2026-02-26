@@ -110,7 +110,7 @@ export const campaignAPI = {
 
 export const paymentAPI = {
     createSubscription: () => api.post('/api/payment/subscription/create'),
-    createRecharge: () => api.post('/api/payment/minutes/create'),
+    createRecharge: (amount) => api.post('/api/payment/minutes/create', { amount }),
     verifyPayment: (data) => api.post('/api/payment/verify', data),
     getBalances: () => api.get('/api/payment/balances'),
     getTransactionHistory: (filter = 'all', page = 1, limit = 50) => api.get('/api/payment/history', { params: { filter, page, limit } }),
@@ -125,5 +125,10 @@ export const settingsAPI = {
     getThrottleSettings: () => api.get('/api/settings/throttle'),
 };
 
+export const notificationsAPI = {
+    getNotifications: () => api.get('/api/notifications'),
+    markAsRead: (id) => api.patch(`/api/notifications/${id}/read`),
+    markAllAsRead: () => api.patch('/api/notifications/read-all'),
+};
 
 export default api;

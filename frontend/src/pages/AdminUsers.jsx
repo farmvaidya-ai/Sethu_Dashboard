@@ -31,6 +31,7 @@ export default function AdminUsers() {
     onConfirm: () => { },
     type: 'default' // 'default' or 'danger'
   });
+  const [btnLoading, setBtnLoading] = useState(false);
 
   // Derive state from URL
   const activeTab = searchParams.get('tab') || 'user';
@@ -132,33 +133,45 @@ export default function AdminUsers() {
 
   const handleCreateUser = async (e) => {
     e.preventDefault();
+    setBtnLoading(true);
     try {
       await adminAPI.createUser(newUser);
       setShowCreateModal(false);
       setShowAgentDropdown(false);
-      setNewUser({ email: '', role: 'user', agents: [] });
+      setNewUser({ email: '', role: 'user', agents: [], subscription_expiry: '', minutes_balance: 0 });
       loadUsers(true);
-      // Refresh creators list in case a new person just became a creator
       const creatorRes = await adminAPI.getCreators();
       setCreators(creatorRes.data.creators || []);
       toast.success('User created! Default password: Password123! (Mock Mode)');
     } catch (err) {
       toast.error(err.response?.data?.error || 'Failed to create user');
+    } finally {
+      setBtnLoading(false);
     }
   };
 
   const handleOpenEditAgents = (user) => {
-    setEditingUser({ ...user, agents: user.agents || [] });
+    setEditingUser({
+      ...user,
+      agents: user.agents || [],
+      low_balance_threshold: user.low_balance_threshold || 50,
+      subscription_expiry: user.subscription_expiry ? new Date(user.subscription_expiry).toISOString().split('T')[0] : '',
+      minutes_balance: user.minutes_balance || 0
+    });
     setShowAgentDropdown(false);
     setShowEditAgentsModal(true);
   };
 
   const handleUpdateUser = async () => {
+    setBtnLoading(true);
     try {
       await Promise.all([
         adminAPI.updateAgents(editingUser.user_id, editingUser.agents),
         adminAPI.updateUser(editingUser.user_id, {
-          role: editingUser.role
+          role: editingUser.role,
+          low_balance_threshold: parseInt(editingUser.low_balance_threshold) || 50,
+          subscription_expiry: editingUser.subscription_expiry || null,
+          minutes_balance: parseInt(editingUser.minutes_balance) || 0
         })
       ]);
       setShowEditAgentsModal(false);
@@ -167,6 +180,8 @@ export default function AdminUsers() {
       toast.success('User updated successfully!');
     } catch (err) {
       toast.error(err.response?.data?.error || 'Failed to update user');
+    } finally {
+      setBtnLoading(false);
     }
   };
 
@@ -319,6 +334,7 @@ export default function AdminUsers() {
                 <th>Status</th>
                 <th>Created By</th>
                 <th>Created Date</th>
+                <th>Sub & Credits</th>
                 <th>Actions</th>
               </tr>
             </thead>
@@ -374,6 +390,12 @@ export default function AdminUsers() {
                       </div>
                     </td>
                     <td>{new Date(user.created_at).toLocaleDateString()}</td>
+                    <td>
+                      <div className="creator-info" style={{ display: 'flex', flexDirection: 'column' }}>
+                        <span>Exp: {user.subscription_expiry ? new Date(user.subscription_expiry).toLocaleDateString() : 'None'}</span>
+                        <span style={{ color: '#008F4B', fontWeight: 'bold' }}>{user.minutes_balance || 0} Credits</span>
+                      </div>
+                    </td>
                     <td>
                       <div className="action-buttons">
                         <button
@@ -455,24 +477,151 @@ export default function AdminUsers() {
         {showCreateModal && (
           <div className="modal-overlay" onClick={() => setShowCreateModal(false)}>
             <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-              <h2>Create New User</h2>
-              <form onSubmit={handleCreateUser}>
-                <div className="form-group">
-                  <label>Email *</label>
-                  <input
-                    type="email"
-                    value={newUser.email}
-                    onChange={(e) => setNewUser({ ...newUser, email: e.target.value })}
-                    required
-                    placeholder="user@example.com"
-                  />
-                </div>
+              <div className="modal-header">
+                <h2>Create New User</h2>
+              </div>
+              <div className="modal-body">
+                <form onSubmit={handleCreateUser}>
+                  <div className="form-group">
+                    <label>Email *</label>
+                    <input
+                      type="email"
+                      value={newUser.email}
+                      onChange={(e) => setNewUser({ ...newUser, email: e.target.value })}
+                      required
+                      placeholder="user@example.com"
+                    />
+                  </div>
+
+                  <div className="form-group">
+                    <label>Role *</label>
+                    <select
+                      value={newUser.role}
+                      onChange={(e) => setNewUser({ ...newUser, role: e.target.value })}
+                    >
+                      {currentUser?.role === 'super_admin' && (
+                        <>
+                          <option value="super_admin">Super Admin</option>
+                          <option value="admin">Admin</option>
+                        </>
+                      )}
+                      <option value="user">User</option>
+                    </select>
+                  </div>
+
+
+
+                  <div className="form-group">
+                    <label>Assign Agents</label>
+                    <div className="custom-dropdown">
+                      <div
+                        className="dropdown-trigger"
+                        onClick={() => setShowAgentDropdown(!showAgentDropdown)}
+                        style={{ height: 'auto', minHeight: '42px', padding: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'white', border: '1px solid #e2e8f0', borderRadius: '8px' }}
+                      >
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', flex: 1 }}>
+                          {newUser.agents.length === 0 && <span style={{ color: '#a0aec0', paddingLeft: '8px', fontSize: '0.9rem' }}>Select Agents...</span>}
+                          {newUser.agents.map(agentId => {
+                            const agent = allAgents.find(a => a.agent_id === agentId);
+                            return (
+                              <span key={agentId} style={{ background: '#e6fffa', color: '#008F4B', border: '1px solid #b2f5ea', padding: '2px 6px', borderRadius: '4px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                {agent ? agent.name : agentId}
+                                <span
+                                  onClick={(e) => { e.stopPropagation(); toggleAgentInList(agentId, true); }}
+                                  style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '2px' }}
+                                >
+                                  <X size={12} />
+                                </span>
+                              </span>
+                            );
+                          })}
+                        </div>
+                        <ChevronDown size={18} className={showAgentDropdown ? 'rotate' : ''} style={{ color: '#a0aec0', marginLeft: '8px' }} />
+                      </div>
+
+                      {showAgentDropdown && (
+                        <div className="dropdown-content">
+                          <div className="agent-list">
+                            {allAgents.map(agent => (
+                              <label key={agent.agent_id} className="agent-checkbox-item">
+                                <input
+                                  type="checkbox"
+                                  checked={newUser.agents.includes(agent.agent_id)}
+                                  onChange={() => toggleAgentInList(agent.agent_id, true)}
+                                />
+                                <span>{agent.name}</span>
+                              </label>
+                            ))}
+                            {allAgents.length === 0 && <p className="text-center p-2">No agents found.</p>}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {currentUser?.role === 'super_admin' && newUser.role !== 'user' && (
+                    <>
+                      <div className="form-group" style={{ marginTop: '15px' }}>
+                        <label>Platform Access End Date (Optional)</label>
+                        <input
+                          type="date"
+                          value={newUser.subscription_expiry || ''}
+                          onChange={(e) => setNewUser({ ...newUser, subscription_expiry: e.target.value })}
+                          title="If set, the user's platform access will expire on this date."
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label>Grant Free Call Credits</label>
+                        <input
+                          type="number"
+                          min="0"
+                          value={newUser.minutes_balance || ''}
+                          onChange={(e) => setNewUser({ ...newUser, minutes_balance: e.target.value })}
+                          placeholder="e.g. 5000"
+                          title="Give arbitrary free credits during creation."
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  {import.meta.env.DEV && (
+                    <div style={{ margin: '1rem 0', padding: '0.75rem', backgroundColor: 'rgba(0, 143, 75, 0.05)', color: '#006837', borderRadius: '4px', fontSize: '0.85rem' }}>
+                      <strong>Dev Mode:</strong> A random secure password is generated for the new user. Check console for password if no email is configured.
+                    </div>
+                  )}
+
+                  <div className="modal-actions">
+                    <button type="button" onClick={() => setShowCreateModal(false)} className="cancel-btn" disabled={btnLoading}>
+                      Cancel
+                    </button>
+                    <button type="submit" className="submit-btn" disabled={btnLoading} style={{ display: 'flex', alignItems: 'center', gap: '8px', opacity: btnLoading ? 0.8 : 1 }}>
+                      {btnLoading ? (
+                        <><svg style={{ animation: 'spin 0.8s linear infinite', width: 16, height: 16 }} viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5"><circle cx="12" cy="12" r="10" strokeOpacity="0.3" /><path d="M12 2a10 10 0 0 1 10 10" /></svg> Creating...</>
+                      ) : 'Create User'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Edit Agents Modal */}
+        {showEditAgentsModal && editingUser && (
+          <div className="modal-overlay" onClick={() => setShowEditAgentsModal(false)}>
+            <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <h2>✏️ Edit User: {editingUser.email}</h2>
+              </div>
+              <div className="modal-body">
 
                 <div className="form-group">
-                  <label>Role *</label>
+                  <label>Role</label>
                   <select
-                    value={newUser.role}
-                    onChange={(e) => setNewUser({ ...newUser, role: e.target.value })}
+                    value={editingUser.role}
+                    onChange={(e) => setEditingUser({ ...editingUser, role: e.target.value })}
+                    disabled={currentUser?.role !== 'super_admin'}
+                    title={currentUser?.role !== 'super_admin' ? "Only Super Admins can change user roles" : ""}
                   >
                     {currentUser?.role === 'super_admin' && (
                       <>
@@ -486,8 +635,23 @@ export default function AdminUsers() {
 
 
 
+                {editingUser.role !== 'user' && (
+                  <div className="form-group">
+                    <label>Low Balance Threshold (Credits)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      value={editingUser.low_balance_threshold}
+                      onChange={(e) => setEditingUser({ ...editingUser, low_balance_threshold: e.target.value })}
+                      placeholder="100"
+                      disabled={currentUser?.role !== 'super_admin'}
+                      title={currentUser?.role !== 'super_admin' ? "Only Super Admins can change low balance threshold." : "Notify user when balance drops below this amount of credits."}
+                    />
+                  </div>
+                )}
+
                 <div className="form-group">
-                  <label>Assign Agents</label>
+                  <label>Assigned Agents</label>
                   <div className="custom-dropdown">
                     <div
                       className="dropdown-trigger"
@@ -495,14 +659,14 @@ export default function AdminUsers() {
                       style={{ height: 'auto', minHeight: '42px', padding: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'white', border: '1px solid #e2e8f0', borderRadius: '8px' }}
                     >
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', flex: 1 }}>
-                        {newUser.agents.length === 0 && <span style={{ color: '#a0aec0', paddingLeft: '8px', fontSize: '0.9rem' }}>Select Agents...</span>}
-                        {newUser.agents.map(agentId => {
+                        {editingUser.agents.length === 0 && <span style={{ color: '#a0aec0', paddingLeft: '8px', fontSize: '0.9rem' }}>Select Agents...</span>}
+                        {editingUser.agents.map(agentId => {
                           const agent = allAgents.find(a => a.agent_id === agentId);
                           return (
                             <span key={agentId} style={{ background: '#e6fffa', color: '#008F4B', border: '1px solid #b2f5ea', padding: '2px 6px', borderRadius: '4px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '4px' }}>
                               {agent ? agent.name : agentId}
                               <span
-                                onClick={(e) => { e.stopPropagation(); toggleAgentInList(agentId, true); }}
+                                onClick={(e) => { e.stopPropagation(); toggleAgentInList(agentId); }}
                                 style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '2px' }}
                               >
                                 <X size={12} />
@@ -521,8 +685,8 @@ export default function AdminUsers() {
                             <label key={agent.agent_id} className="agent-checkbox-item">
                               <input
                                 type="checkbox"
-                                checked={newUser.agents.includes(agent.agent_id)}
-                                onChange={() => toggleAgentInList(agent.agent_id, true)}
+                                checked={editingUser.agents.includes(agent.agent_id)}
+                                onChange={() => toggleAgentInList(agent.agent_id)}
                               />
                               <span>{agent.name}</span>
                             </label>
@@ -534,105 +698,39 @@ export default function AdminUsers() {
                   </div>
                 </div>
 
-                <div style={{ margin: '1rem 0', padding: '0.75rem', backgroundColor: 'rgba(0, 143, 75, 0.05)', color: '#006837', borderRadius: '4px', fontSize: '0.85rem' }}>
-                  <strong>Dev Mode Note:</strong> Emails are not sent.
-                  <br />The default password for new users is: <strong>Password123!</strong>
-                </div>
+                {currentUser?.role === 'super_admin' && editingUser.role !== 'user' && (
+                  <>
+                    <div className="form-group" style={{ marginTop: '15px' }}>
+                      <label>Platform Access End Date</label>
+                      <input
+                        type="date"
+                        value={editingUser.subscription_expiry || ''}
+                        onChange={(e) => setEditingUser({ ...editingUser, subscription_expiry: e.target.value })}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Call Credits Balance</label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={editingUser.minutes_balance || 0}
+                        onChange={(e) => setEditingUser({ ...editingUser, minutes_balance: e.target.value })}
+                        placeholder="e.g. 5000"
+                      />
+                    </div>
+                  </>
+                )}
 
                 <div className="modal-actions">
-                  <button type="button" onClick={() => setShowCreateModal(false)} className="cancel-btn">
+                  <button type="button" onClick={() => setShowEditAgentsModal(false)} className="cancel-btn" disabled={btnLoading}>
                     Cancel
                   </button>
-                  <button type="submit" className="submit-btn">
-                    Create User
+                  <button onClick={handleUpdateUser} className="submit-btn" disabled={btnLoading} style={{ display: 'flex', alignItems: 'center', gap: '8px', opacity: btnLoading ? 0.8 : 1 }}>
+                    {btnLoading ? (
+                      <><svg style={{ animation: 'spin 0.8s linear infinite', width: 16, height: 16 }} viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5"><circle cx="12" cy="12" r="10" strokeOpacity="0.3" /><path d="M12 2a10 10 0 0 1 10 10" /></svg> Saving...</>
+                    ) : 'Save Changes'}
                   </button>
                 </div>
-              </form>
-            </div>
-          </div>
-        )}
-
-        {/* Edit Agents Modal */}
-        {showEditAgentsModal && editingUser && (
-          <div className="modal-overlay" onClick={() => setShowEditAgentsModal(false)}>
-            <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-              <h2>Edit User: {editingUser.email}</h2>
-
-              <div className="form-group">
-                <label>Role</label>
-                <select
-                  value={editingUser.role}
-                  onChange={(e) => setEditingUser({ ...editingUser, role: e.target.value })}
-                  disabled={currentUser?.role !== 'super_admin'}
-                  title={currentUser?.role !== 'super_admin' ? "Only Super Admins can change user roles" : ""}
-                >
-                  {currentUser?.role === 'super_admin' && (
-                    <>
-                      <option value="super_admin">Super Admin</option>
-                      <option value="admin">Admin</option>
-                    </>
-                  )}
-                  <option value="user">User</option>
-                </select>
-              </div>
-
-
-
-              <div className="form-group">
-                <label>Assigned Agents</label>
-                <div className="custom-dropdown">
-                  <div
-                    className="dropdown-trigger"
-                    onClick={() => setShowAgentDropdown(!showAgentDropdown)}
-                    style={{ height: 'auto', minHeight: '42px', padding: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'white', border: '1px solid #e2e8f0', borderRadius: '8px' }}
-                  >
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', flex: 1 }}>
-                      {editingUser.agents.length === 0 && <span style={{ color: '#a0aec0', paddingLeft: '8px', fontSize: '0.9rem' }}>Select Agents...</span>}
-                      {editingUser.agents.map(agentId => {
-                        const agent = allAgents.find(a => a.agent_id === agentId);
-                        return (
-                          <span key={agentId} style={{ background: '#e6fffa', color: '#008F4B', border: '1px solid #b2f5ea', padding: '2px 6px', borderRadius: '4px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                            {agent ? agent.name : agentId}
-                            <span
-                              onClick={(e) => { e.stopPropagation(); toggleAgentInList(agentId); }}
-                              style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '2px' }}
-                            >
-                              <X size={12} />
-                            </span>
-                          </span>
-                        );
-                      })}
-                    </div>
-                    <ChevronDown size={18} className={showAgentDropdown ? 'rotate' : ''} style={{ color: '#a0aec0', marginLeft: '8px' }} />
-                  </div>
-
-                  {showAgentDropdown && (
-                    <div className="dropdown-content">
-                      <div className="agent-list">
-                        {allAgents.map(agent => (
-                          <label key={agent.agent_id} className="agent-checkbox-item">
-                            <input
-                              type="checkbox"
-                              checked={editingUser.agents.includes(agent.agent_id)}
-                              onChange={() => toggleAgentInList(agent.agent_id)}
-                            />
-                            <span>{agent.name}</span>
-                          </label>
-                        ))}
-                        {allAgents.length === 0 && <p className="text-center p-2">No agents found.</p>}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              <div className="modal-actions">
-                <button type="button" onClick={() => setShowEditAgentsModal(false)} className="cancel-btn">
-                  Cancel
-                </button>
-                <button onClick={handleUpdateUser} className="submit-btn">
-                  Save Changes
-                </button>
               </div>
             </div>
           </div>
@@ -652,17 +750,25 @@ export default function AdminUsers() {
                 <button
                   onClick={() => setShowConfirmModal(false)}
                   className="cancel-btn"
+                  disabled={btnLoading}
                 >
                   Cancel
                 </button>
                 <button
-                  onClick={confirmConfig.onConfirm}
+                  onClick={async () => {
+                    setBtnLoading(true);
+                    try { await confirmConfig.onConfirm(); } finally { setBtnLoading(false); }
+                  }}
                   className={confirmConfig.type === 'danger' ? 'delete-btn' : 'submit-btn'}
-                  style={confirmConfig.type === 'danger' ? {
-                    background: '#e53e3e', color: 'white', border: 'none', padding: '10px 20px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600
-                  } : {}}
+                  disabled={btnLoading}
+                  style={{
+                    ...(confirmConfig.type === 'danger' ? { background: '#e53e3e', color: 'white', border: 'none', padding: '10px 20px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 } : {}),
+                    display: 'flex', alignItems: 'center', gap: '8px', opacity: btnLoading ? 0.8 : 1
+                  }}
                 >
-                  Confirm
+                  {btnLoading ? (
+                    <><svg style={{ animation: 'spin 0.8s linear infinite', width: 16, height: 16 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10" strokeOpacity="0.3" /><path d="M12 2a10 10 0 0 1 10 10" /></svg> Processing...</>
+                  ) : 'Confirm'}
                 </button>
               </div>
             </div>
@@ -901,19 +1007,48 @@ export default function AdminUsers() {
           left: 0;
           right: 0;
           bottom: 0;
-          background: rgba(0, 0, 0, 0.5);
-          display: flex;
-          align-items: center;
-          justify-content: center;
+          background: rgba(0, 0, 0, 0.55);
           z-index: 1000;
+          overflow-y: auto;
+          padding: 0;
         }
 
         .modal-content {
           background: white;
           border-radius: 12px;
-          padding: 32px;
           width: 90%;
-          max-width: 500px;
+          max-width: 520px;
+          max-height: none;
+          overflow: hidden;
+          display: flex;
+          flex-direction: column;
+          margin: 40px auto;
+        }
+
+        .modal-header {
+          padding: 24px 28px 16px 28px;
+          border-bottom: 2px solid #f0f4f8;
+          position: sticky;
+          top: 0;
+          background: white;
+          z-index: 2;
+          border-radius: 12px 12px 0 0;
+        }
+
+        .modal-header h2 {
+          margin: 0;
+          color: #1a202c;
+          font-size: 1.25rem;
+          font-weight: 700;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .modal-body {
+          overflow-y: auto;
+          padding: 20px 28px 24px 28px;
+          flex: 1;
         }
 
         .modal-content h2 {

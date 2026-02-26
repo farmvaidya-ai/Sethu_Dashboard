@@ -81,6 +81,14 @@ const User = sequelize.define('User', {
     last_low_credit_alert: {
         type: DataTypes.DATE,
         defaultValue: null
+    },
+    low_balance_threshold: {
+        type: DataTypes.INTEGER,
+        defaultValue: 50
+    },
+    last_expiry_alert_at: {
+        type: DataTypes.DATE,
+        defaultValue: null
     }
 }, {
     tableName: APP_ENV === 'test' ? 'test_users' : 'Users',

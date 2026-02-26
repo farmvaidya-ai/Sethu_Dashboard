@@ -1,59 +1,60 @@
+# Environment Variables - NEVER commit these
+.env
+.env.local
+.env.production
+.env.staging
+backend/.env
+frontend/.env
+
+# Node
+node_modules/
+backend/node_modules/
+frontend/node_modules/
+
+# Build outputs
+frontend/dist/
+frontend/build/
+
 # Logs
-logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-
-# Raw log dumps
-*-agent-logs-*.txt
-
-# Environment variables - NEVER COMMIT!
-.env
-.env.local
-.env.production
-.env.test
-frontend/.env
-backend/.env
-
-# Secrets and credentials - NEVER COMMIT!
-MASTER_ADMIN_CREDENTIALS.md
-*_CREDENTIALS.md
-secrets/
-*.key
-*.pem
-
-# Dependencies
-node_modules/
-dist/
-build/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
+logs/
+backend/logs/
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Database
-*.sqlite
-*.db
+# IDE
+.vscode/
+.idea/
+*.swp
 
-# Temporary/diagnostic files
-diag.js
-*-output.txt
-*-output.log
+# Temporary
+tmp/
+temp/
+*.tmp
 
-campaign_contacts_sample.csv
-new_logs_fetch_from_postgre.md
-# PDFs (documentation)
-*.pdf
+# Database dumps
+*.sql
+*.dump
 
-# Uploads (user-generated)
+# Uploaded files / media
 uploads/
-ngo-logs-2026-02-24.txt
-ngo-logs-2026-02-05-12-00-28.txt
+
+master_admin_credentials.md
+master_admin_quick_ref.txt
+*CREDENTIALS*
+*QUICK_REF*
+*_credentials*
+
+# Log text dumps
+*.txt
+!README.txt
+
+# Internal dev notes
+FIX_*.md
+DATA_*.md
+COMPLETE_SETUP*.md

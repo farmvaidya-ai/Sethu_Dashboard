@@ -238,7 +238,7 @@ const processCampaignCalls = async (campaignId, contacts, callerId, appId, callI
         await pool.query(
             `UPDATE "${LOCAL_CAMPAIGNS_TABLE}" SET status = 'paused-daily', date_updated = NOW() WHERE id = $1`,
             [campaignId]
-        ).catch(() => {});
+        ).catch(() => { });
 
         // Sleep in 1-minute chunks so abort is responsive
         const chunk = 60_000;
@@ -251,7 +251,7 @@ const processCampaignCalls = async (campaignId, contacts, callerId, appId, callI
         await pool.query(
             `UPDATE "${LOCAL_CAMPAIGNS_TABLE}" SET status = 'in-progress', date_updated = NOW() WHERE id = $1`,
             [campaignId]
-        ).catch(() => {});
+        ).catch(() => { });
         console.log(`▶️ [Campaign ${campaignId}] Resuming daily calls.`);
     };
 
@@ -464,11 +464,13 @@ export const initiateCampaign = async (req, res) => {
         if (!user) throw new Error('User not found');
 
         let billableUser = user;
-        if (user.role === 'user' && user.created_by) {
+        if (user.role === 'user') {
             const parentRes = await pool.query(`SELECT minutes_balance, subscription_expiry, is_active FROM "${tableName}" WHERE user_id = $1`, [user.created_by]);
             if (parentRes.rows[0]) {
                 billableUser = parentRes.rows[0];
             }
+            if (filePath && fs.existsSync(filePath)) fs.unlink(filePath, () => { });
+            return res.status(403).json({ error: 'Users are permitted to inspect campaigns, but cannot create campaigns. Contact your administrator.' });
         }
 
         const isExempt = user.role === 'super_admin' || userId === 'master_root_0';
