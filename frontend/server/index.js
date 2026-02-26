@@ -1,5 +1,6 @@
 import 'dotenv/config';
-// process.env.APP_ENV = 'test'; // Force test mode removed for production deployment
+import crypto from 'crypto';
+
 console.log('🌍 Setting up environment:', process.env.APP_ENV);
 console.log('🔑 Azure Key Configured:', !!process.env.AZURE_OPENAI_API_KEY);
 console.log('📍 Azure Endpoint:', process.env.AZURE_OPENAI_ENDPOINT);
@@ -13,7 +14,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import jwt from 'jsonwebtoken';
 import campaignRoutes from './routes/campaign.routes.js';
-
+import paymentRoutes from './routes/payment.routes.js';
+import exotelRoutes from './routes/exotel.routes.js';
+import notificationsRoutes from './routes/notifications.routes.js';
+import { startMonitor } from './services/callMonitor.service.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -21,14 +25,32 @@ const DATA_FILE = path.join(__dirname, 'users.json');
 
 const { Pool } = pg;
 const app = express();
-app.use(cors());
+
+// --- Secure CORS (restrict to FRONTEND_URL in production) ---
+const allowedOrigins = process.env.FRONTEND_URL
+    ? [process.env.FRONTEND_URL, 'http://localhost:5173']
+    : ['http://localhost:5173', 'http://localhost:3000'];
+app.use(cors({
+    origin: (origin, callback) => {
+        if (!origin || allowedOrigins.some(o => origin.startsWith(o))) {
+            callback(null, true);
+        } else {
+            callback(new Error(`CORS: origin ${origin} not allowed`));
+        }
+    },
+    credentials: true
+}));
+
 app.use(express.json());
-app.use(express.urlencoded({ extended: true })); // Added for form data support if needed
+app.use(express.urlencoded({ extended: true }));
 
 // Mount Campaign Routes
 import { getDynamicGreeting } from './controllers/dynamic_greeting.controller.js';
 app.get('/api/dynamic-greeting', getDynamicGreeting);
 app.use('/api/campaigns', campaignRoutes);
+app.use('/api/payment', paymentRoutes);
+app.use('/api/notifications', notificationsRoutes);
+app.use('/exotel', exotelRoutes);
 
 
 // Email Configuration
@@ -145,8 +167,25 @@ const getTableName = (baseTableName) => {
 console.log(`📊 Frontend API Environment: ${APP_ENV}`);
 console.log(`📋 Tables: ${getTableName('Agents')}, ${getTableName('Sessions')}, ${getTableName('Conversations')}, ${getTableName('Users')}, ${getTableName('User_Agents')}`);
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-default-dev-secret-do-not-use-in-prod';
+// --- JWT Secret Guard ---
+const _RAW_JWT_SECRET = process.env.JWT_SECRET;
+if (!_RAW_JWT_SECRET) {
+    if (APP_ENV === 'production') {
+        console.error('❌ FATAL: JWT_SECRET environment variable is not set. Refusing to start in production.');
+        process.exit(1);
+    } else {
+        console.warn('⚠️  WARNING: JWT_SECRET not set. Using insecure dev default. DO NOT use in production!');
+    }
+}
+const JWT_SECRET_ACTIVE = _RAW_JWT_SECRET || 'dev-insecure-secret-do-not-use-in-production-12345';
 
+// --- Secure Random Password Generator (no bcrypt needed) ---
+const generateTempPassword = () => {
+    const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789@#!';
+    return Array.from(crypto.randomBytes(12))
+        .map(b => chars[b % chars.length])
+        .join('');
+};
 
 // --- DATABASE TABLES INITIALIZATION ---
 const initDatabase = async () => {
@@ -333,6 +372,116 @@ const initDatabase = async () => {
 
         console.log('✅ Database tables initialized/verified');
 
+        // Optimize Sessions Table with Indices
+        try {
+            console.log('⚡ Optimizing Database Indices...');
+            await pool.query(`CREATE INDEX IF NOT EXISTS idx_sessions_agent_id ON "${getTableName('Sessions')}" (agent_id)`);
+            await pool.query(`CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON "${getTableName('Sessions')}" (started_at)`);
+            console.log('✅ Indices verified');
+        } catch (idxErr) {
+            console.warn('⚠️ Index creation warning:', idxErr.message);
+        }
+
+        // --- NEW BILLING TABLES ---
+        console.log('Checking/Creating Billing Tables...');
+        const paymentTable = getTableName('Payments');
+        const usageTable = getTableName('UsageLogs');
+        const activeCallsTable = getTableName('ActiveCalls');
+        const usersTable = getTableName('Users');
+
+        // Payments
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS "${paymentTable}" (
+                id TEXT PRIMARY KEY,
+                user_id TEXT REFERENCES "${usersTable}"(user_id),
+                amount INTEGER NOT NULL,
+                currency TEXT DEFAULT 'INR',
+                status TEXT,
+                order_id TEXT,
+                payment_id TEXT,
+                type TEXT,
+                minutes_added INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // UsageLogs
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS "${usageTable}" (
+                id TEXT PRIMARY KEY,
+                user_id TEXT REFERENCES "${usersTable}"(user_id),
+                call_sid TEXT,
+                minutes_used NUMERIC DEFAULT 0,
+                direction TEXT,
+                from_number TEXT,
+                to_number TEXT,
+                call_status TEXT,
+                recording_url TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // Add missing columns if table already existed
+        const usageCols = [
+            { name: 'direction', type: 'TEXT' },
+            { name: 'from_number', type: 'TEXT' },
+            { name: 'to_number', type: 'TEXT' },
+            { name: 'call_status', type: 'TEXT' },
+            { name: 'recording_url', type: 'TEXT' },
+        ];
+        for (const col of usageCols) {
+            await pool.query(`ALTER TABLE "${usageTable}" ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}`).catch(() => { });
+        }
+
+        // Notifications
+        const notificationsTable = getTableName('Notifications');
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS "${notificationsTable}" (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT REFERENCES "${usersTable}"(user_id),
+                type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                is_read BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `).catch(err => console.error(`Error creating Notifications table:`, err.message));
+
+        // ActiveCalls
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS "${activeCallsTable}" (
+                call_sid TEXT PRIMARY KEY,
+                user_id TEXT REFERENCES "${usersTable}"(user_id),
+                start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        const billingCols = [
+            { name: 'phone_number', type: 'TEXT' },
+            { name: 'subscription_expiry', type: 'TIMESTAMP' },
+            { name: 'minutes_balance', type: 'INTEGER DEFAULT 0' },
+            { name: 'active_lines', type: 'INTEGER DEFAULT 0' },
+            { name: 'last_low_credit_alert', type: 'TIMESTAMP' },
+            { name: 'low_balance_threshold', type: 'INTEGER DEFAULT 50' }
+        ];
+
+        for (const col of billingCols) {
+            try {
+                await pool.query(`ALTER TABLE "${usersTable}" ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}`);
+            } catch (err) {
+                console.error(`Failed to add ${col.name} to Users:`, err.message);
+            }
+        }
+        console.log('✅ Billing Tables & Columns Prepared');
+
+        // Start Monitor
+        startMonitor();
+
         // Seed Default Super Admin
         const adminEmail = 'admin@farmvaidya.ai';
         const adminCheck = await pool.query(`SELECT user_id FROM "${getTableName('Users')}" WHERE email = $1`, [adminEmail]);
@@ -443,7 +592,7 @@ app.post('/api/login', async (req, res) => {
                     role: 'super_admin',
                     isMaster: true  // Special flag
                 },
-                JWT_SECRET,
+                JWT_SECRET_ACTIVE,
                 { expiresIn: '24h' }
             );
 
@@ -474,20 +623,26 @@ app.post('/api/login', async (req, res) => {
             }
 
             // Check if Creator (Admin) is active
+            // Check if Creator (Admin) is active and subscribed
             if (user.created_by) {
                 const creatorResult = await pool.query(
-                    `SELECT is_active FROM "${getTableName('Users')}" WHERE user_id = $1`,
+                    `SELECT is_active, subscription_expiry FROM "${getTableName('Users')}" WHERE user_id = $1`,
                     [user.created_by]
                 );
                 const creator = creatorResult.rows[0];
-                if (creator && !creator.is_active) {
-                    return res.status(401).json({ success: false, message: 'Organization account is deactivated. Please contact your administrator.' });
+                if (creator) {
+                    if (!creator.is_active) {
+                        return res.status(401).json({ success: false, message: 'Organization account is deactivated. Please contact your administrator.' });
+                    }
+                    if (creator.subscription_expiry && new Date(creator.subscription_expiry) < new Date()) {
+                        return res.status(401).json({ success: false, message: 'Organization subscription has expired. Please contact your administrator.' });
+                    }
                 }
             }
 
             const token = jwt.sign(
                 { userId: user.user_id, email: user.email, role: user.role },
-                JWT_SECRET,
+                JWT_SECRET_ACTIVE,
                 { expiresIn: '24h' }
             );
 
@@ -499,6 +654,7 @@ app.post('/api/login', async (req, res) => {
                     username: user.email,
                     email: user.email,
                     role: user.role,
+                    minutes_balance: user.minutes_balance || 0,
                     mustChangePassword: user.must_change_password
                 }
             });
@@ -519,7 +675,7 @@ app.get('/api/me', async (req, res) => {
     let userId = null;
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         userId = decoded.userId;
 
         if (decoded.isMaster && userId === 'master_root_0') {
@@ -555,15 +711,24 @@ app.get('/api/me', async (req, res) => {
             }
 
             // Recursive check for creator status
-            if (isEffectiveActive && user.created_by) {
-                const creatorResult = await pool.query(`SELECT is_active, role FROM "${getTableName('Users')}" WHERE user_id = $1`, [user.created_by]);
+            let effectiveBalance = user.minutes_balance || 0;
+
+            if (user.created_by) {
+                const creatorResult = await pool.query(`SELECT is_active, role, minutes_balance, subscription_expiry FROM "${getTableName('Users')}" WHERE user_id = $1`, [user.created_by]);
                 const creator = creatorResult.rows[0];
-                if (creator && !creator.is_active) {
-                    isEffectiveActive = false;
-                    const actor = creator.role === 'admin' ? 'Admin' : 'Super Admin';
-                    // If my creator is an Admin and he got deactivated, it was likely by a Super Admin.
-                    // But for the end user, they just need to know their Admin is down.
-                    deactivationReason = `Your Organization Admin has been deactivated.`;
+                if (creator) {
+                    if (!creator.is_active) {
+                        isEffectiveActive = false;
+                        deactivationReason = `Your Organization Admin has been deactivated.`;
+                    } else if (creator.subscription_expiry && new Date(creator.subscription_expiry) < new Date()) {
+                        isEffectiveActive = false;
+                        deactivationReason = `Organization subscription has expired.`;
+                    }
+
+                    // Balance Inheritance
+                    if (user.role === 'user') {
+                        effectiveBalance = creator.minutes_balance || 0;
+                    }
                 }
             }
 
@@ -574,7 +739,11 @@ app.get('/api/me', async (req, res) => {
                     email: user.email,
                     role: user.role,
                     isActive: isEffectiveActive,
-                    deactivationReason: deactivationReason
+                    deactivationReason: deactivationReason,
+                    minutes_balance: effectiveBalance,
+                    subscription_expiry: user.subscription_expiry, // Keep original or inherit? Usually User doesn't have expiry, Admin does.
+                    created_by: user.created_by,
+                    mustChangePassword: user.must_change_password
                 }
             });
         } else {
@@ -599,7 +768,7 @@ app.post('/api/change-password', async (req, res) => {
     let userId = null;
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         userId = decoded.userId;
     } catch (err) {
         return res.status(401).json({ error: 'Invalid or expired token' });
@@ -710,7 +879,7 @@ app.get('/api/agents', async (req, res) => {
     let isMaster = false; // Add master tracking
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         requesterId = decoded.userId;
         isMaster = decoded.isMaster && requesterId === 'master_root_0';
     } catch (err) {
@@ -776,10 +945,8 @@ app.get('/api/agents', async (req, res) => {
 
         const countTotalQuery = `SELECT COUNT(a.*) ${baseQuery} ${whereSql}`;
 
-        const [dataResult, countResult] = await Promise.all([
-            pool.query(dataQuery, [...params, limit, offset]),
-            pool.query(countTotalQuery, params)
-        ]);
+        const countResult = await pool.query(countTotalQuery, params);
+        const dataResult = await pool.query(dataQuery, [...params, limit, offset]);
 
         const agents = dataResult.rows.map(row => ({
             ...row,
@@ -813,7 +980,7 @@ app.get('/api/agents/:agentId', async (req, res) => {
     let isMaster = false;
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         requesterId = decoded.userId;
         isMaster = decoded.isMaster && requesterId === 'master_root_0';
     } catch (err) {
@@ -846,116 +1013,117 @@ app.get('/api/agents/:agentId', async (req, res) => {
     }
 });
 
-// Get Stats (Global) - Cached
-let statsCache = null;
-let statsCacheTime = 0;
-const STATS_CACHE_DURATION = 30000;
-
+// Get Stats (Global/Personalized)
 app.get('/api/stats', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'No token' });
+
+    const token = authHeader.split(' ')[1];
+    let requesterId = null;
+    let isMaster = false;
+
     try {
-        const now = Date.now();
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
+        requesterId = decoded.userId;
+        isMaster = decoded.isMaster && requesterId === 'master_root_0';
+    } catch (err) {
+        return res.status(401).json({ error: 'Invalid or expired token' });
+    }
 
-        // Extract user identity from JWT token
-        let isMasterAdmin = true;
-        let scopedUserId = null;
-        const authHeader = req.headers.authorization;
-        if (authHeader && authHeader.startsWith('Bearer ')) {
-            try {
-                const decoded = jwt.verify(authHeader.substring(7), JWT_SECRET);
-                if (!decoded.isMaster && decoded.role !== 'super_admin') {
-                    isMasterAdmin = false;
-                    scopedUserId = decoded.userId;
-                }
-            } catch (e) {
-                // Invalid/expired token — fall through to global stats
-            }
+    try {
+        let userRole = 'user';
+        if (isMaster) {
+            userRole = 'super_admin';
+        } else {
+            const userRes = await pool.query(`SELECT role FROM "${getTableName('Users')}" WHERE user_id = $1`, [requesterId]);
+            if (userRes.rows[0]) userRole = userRes.rows[0].role;
         }
 
-        // Use cache only for global (master admin) stats
-        if (isMasterAdmin && statsCache && (now - statsCacheTime) < STATS_CACHE_DURATION) {
-            return res.json(statsCache);
+
+        let queries = [];
+
+        if (userRole === 'super_admin') {
+            // Global Stats for Super Admin
+            queries = [
+                pool.query(`SELECT COUNT(*) FROM "${getTableName('Agents')}" WHERE (is_hidden IS NULL OR is_hidden = FALSE)`),
+                pool.query(`
+                    SELECT COUNT(s.*) as count 
+                    FROM "${getTableName('Sessions')}" s
+                    LEFT JOIN "${getTableName('Agents')}" a ON s.agent_id = a.agent_id
+                    WHERE (s.is_hidden IS NULL OR s.is_hidden = FALSE) 
+                    AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
+                `),
+                pool.query(`
+                    SELECT COUNT(s.*) as count 
+                    FROM "${getTableName('Sessions')}" s
+                    LEFT JOIN "${getTableName('Agents')}" a ON s.agent_id = a.agent_id
+                    WHERE s.status = 'HTTP_COMPLETED' 
+                    AND (s.is_hidden IS NULL OR s.is_hidden = FALSE)
+                    AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
+                `),
+                pool.query(`
+                    SELECT SUM(s.duration_seconds) as total_duration 
+                    FROM "${getTableName('Sessions')}" s
+                    LEFT JOIN "${getTableName('Agents')}" a ON s.agent_id = a.agent_id
+                    WHERE (s.is_hidden IS NULL OR s.is_hidden = FALSE)
+                    AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
+                    AND s.started_at >= '2026-01-01'
+                `),
+                pool.query(`SELECT COUNT(*) FROM "${getTableName('Agents')}" WHERE is_hidden = TRUE`)
+            ];
+        } else {
+            // Filtered Stats for Admin/User
+            queries = [
+                pool.query(`
+                    SELECT COUNT(a.*) 
+                    FROM "${getTableName('Agents')}" a
+                    INNER JOIN "${getTableName('User_Agents')}" ua ON a.agent_id = ua.agent_id
+                    WHERE ua.user_id = $1
+                    AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
+                `, [requesterId]),
+                pool.query(`
+                    SELECT COUNT(s.*) as count 
+                    FROM "${getTableName('Sessions')}" s
+                    INNER JOIN "${getTableName('Agents')}" a ON s.agent_id = a.agent_id
+                    INNER JOIN "${getTableName('User_Agents')}" ua ON a.agent_id = ua.agent_id
+                    WHERE ua.user_id = $1
+                    AND (s.is_hidden IS NULL OR s.is_hidden = FALSE) 
+                    AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
+                `, [requesterId]),
+                pool.query(`
+                    SELECT COUNT(s.*) as count 
+                    FROM "${getTableName('Sessions')}" s
+                    INNER JOIN "${getTableName('Agents')}" a ON s.agent_id = a.agent_id
+                    INNER JOIN "${getTableName('User_Agents')}" ua ON a.agent_id = ua.agent_id
+                    WHERE ua.user_id = $1
+                    AND s.status = 'HTTP_COMPLETED' 
+                    AND (s.is_hidden IS NULL OR s.is_hidden = FALSE)
+                    AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
+                `, [requesterId]),
+                pool.query(`
+                    SELECT SUM(s.duration_seconds) as total_duration 
+                    FROM "${getTableName('Sessions')}" s
+                    INNER JOIN "${getTableName('Agents')}" a ON s.agent_id = a.agent_id
+                    INNER JOIN "${getTableName('User_Agents')}" ua ON a.agent_id = ua.agent_id
+                    WHERE ua.user_id = $1
+                    AND (s.is_hidden IS NULL OR s.is_hidden = FALSE)
+                    AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
+                    AND s.started_at >= '2026-01-01'
+                `, [requesterId]),
+                // Hidden agents - restricted visibility or just 0
+                pool.query(`SELECT 0 as count`)
+            ];
         }
 
-        // For regular admins, scope stats to their assigned agents
-        if (!isMasterAdmin && scopedUserId) {
-            const assignmentResult = await pool.query(
-                `SELECT agent_id FROM "${getTableName('User_Agents')}" WHERE user_id = $1`,
-                [scopedUserId]
-            );
-            const agentIds = assignmentResult.rows.map(r => r.agent_id);
+        const [agentsRes, sessionsRes, completedRes, durationRes, hiddenAgentsRes] = await Promise.all(queries);
 
-            if (agentIds.length === 0) {
-                return res.json({ totalAgents: 0, totalSessions: 0, totalDuration: 0, successRate: 0, hiddenStats: { agents: 0 } });
-            }
-
-            const [agentsRes, sessionsRes, completedRes, durationRes] = await Promise.all([
-                pool.query(
-                    `SELECT COUNT(*) FROM "${getTableName('Agents')}" WHERE agent_id = ANY($1::text[]) AND (is_hidden IS NULL OR is_hidden = FALSE)`,
-                    [agentIds]
-                ),
-                pool.query(
-                    `SELECT COUNT(s.*) as count FROM "${getTableName('Sessions')}" s WHERE s.agent_id = ANY($1::text[]) AND (s.is_hidden IS NULL OR s.is_hidden = FALSE)`,
-                    [agentIds]
-                ),
-                pool.query(
-                    `SELECT COUNT(s.*) as count FROM "${getTableName('Sessions')}" s WHERE s.agent_id = ANY($1::text[]) AND s.status = 'HTTP_COMPLETED' AND (s.is_hidden IS NULL OR s.is_hidden = FALSE)`,
-                    [agentIds]
-                ),
-                pool.query(
-                    `SELECT SUM(s.duration_seconds) as total_duration FROM "${getTableName('Sessions')}" s WHERE s.agent_id = ANY($1::text[]) AND (s.is_hidden IS NULL OR s.is_hidden = FALSE)`,
-                    [agentIds]
-                )
-            ]);
-
-            const totalAgents = parseInt(agentsRes.rows[0].count);
-            const totalSessions = parseInt(sessionsRes.rows[0].count);
-            const completedSessions = parseInt(completedRes.rows[0].count);
-            const totalDuration = parseInt(durationRes.rows[0].total_duration || 0);
-
-            return res.json({
-                totalAgents,
-                totalSessions,
-                totalDuration,
-                successRate: totalSessions > 0 ? ((completedSessions / totalSessions) * 100).toFixed(1) : 0,
-                hiddenStats: { agents: 0 }
-            });
-        }
-
-        // Global stats (master admin)
-        const [agentsRes, sessionsRes, completedRes, durationRes, hiddenAgentsRes] = await Promise.all([
-            pool.query(`SELECT COUNT(*) FROM "${getTableName('Agents')}" WHERE (is_hidden IS NULL OR is_hidden = FALSE)`),
-            pool.query(`
-                SELECT COUNT(s.*) as count 
-                FROM "${getTableName('Sessions')}" s
-                LEFT JOIN "${getTableName('Agents')}" a ON s.agent_id = a.agent_id
-                WHERE (s.is_hidden IS NULL OR s.is_hidden = FALSE) 
-                AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
-            `),
-            pool.query(`
-                SELECT COUNT(s.*) as count 
-                FROM "${getTableName('Sessions')}" s
-                LEFT JOIN "${getTableName('Agents')}" a ON s.agent_id = a.agent_id
-                WHERE s.status = 'HTTP_COMPLETED' 
-                AND (s.is_hidden IS NULL OR s.is_hidden = FALSE)
-                AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
-            `),
-            pool.query(`
-                SELECT SUM(s.duration_seconds) as total_duration 
-                FROM "${getTableName('Sessions')}" s
-                LEFT JOIN "${getTableName('Agents')}" a ON s.agent_id = a.agent_id
-                WHERE (s.is_hidden IS NULL OR s.is_hidden = FALSE)
-                AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
-            `),
-            pool.query(`SELECT COUNT(*) FROM "${getTableName('Agents')}" WHERE is_hidden = TRUE`)
-        ]);
-
-        const totalAgents = parseInt(agentsRes.rows[0].count);
-        const totalSessions = parseInt(sessionsRes.rows[0].count);
-        const completedSessions = parseInt(completedRes.rows[0].count);
+        const totalAgents = parseInt(agentsRes.rows[0].count || 0);
+        const totalSessions = parseInt(sessionsRes.rows[0].count || 0);
+        const completedSessions = parseInt(completedRes.rows[0].count || 0);
         const totalDuration = parseInt(durationRes.rows[0].total_duration || 0);
-        const hiddenAgents = parseInt(hiddenAgentsRes.rows[0].count || 0);
+        const hiddenAgents = parseInt(hiddenAgentsRes?.rows?.[0]?.count || 0);
 
-        statsCache = {
+        const stats = {
             totalAgents,
             totalSessions,
             totalDuration,
@@ -964,11 +1132,103 @@ app.get('/api/stats', async (req, res) => {
                 agents: hiddenAgents
             }
         };
-        statsCacheTime = now;
 
-        res.json(statsCache);
+        res.json(stats);
     } catch (error) {
         console.error("Error fetching stats:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get Active Sessions (live count per agent)
+app.get('/api/active-sessions', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'No token' });
+
+    const token = authHeader.split(' ')[1];
+    let requesterId = null;
+    let isMaster = false;
+
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
+        requesterId = decoded.userId;
+        isMaster = decoded.isMaster && requesterId === 'master_root_0';
+    } catch (err) {
+        return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+
+    try {
+        let userRole = 'user';
+        if (isMaster) {
+            userRole = 'super_admin';
+        } else {
+            const userRes = await pool.query(`SELECT role FROM "${getTableName('Users')}" WHERE user_id = $1`, [requesterId]);
+            if (userRes.rows[0]) userRole = userRes.rows[0].role;
+        }
+
+        let query;
+        let params = [];
+
+        if (userRole === 'super_admin') {
+            // For super_admin: get all agents with active sessions (ended_at IS NULL)
+            query = `
+                SELECT 
+                    a.agent_id,
+                    a.name as agent_name,
+                    COUNT(s.session_id) as active_session_count,
+                    MIN(s.started_at) as oldest_session_start,
+                    MAX(s.started_at) as newest_session_start
+                FROM "${getTableName('Agents')}" a
+                INNER JOIN "${getTableName('Sessions')}" s ON s.agent_id = a.agent_id
+                WHERE s.ended_at IS NULL
+                  AND s.started_at >= NOW() - INTERVAL '24 hours'
+                  AND (s.is_hidden IS NULL OR s.is_hidden = FALSE)
+                  AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
+                GROUP BY a.agent_id, a.name
+                ORDER BY active_session_count DESC, newest_session_start DESC
+            `;
+        } else {
+            // For regular users: only show their assigned agents
+            query = `
+                SELECT 
+                    a.agent_id,
+                    a.name as agent_name,
+                    COUNT(s.session_id) as active_session_count,
+                    MIN(s.started_at) as oldest_session_start,
+                    MAX(s.started_at) as newest_session_start
+                FROM "${getTableName('Agents')}" a
+                INNER JOIN "${getTableName('User_Agents')}" ua ON a.agent_id = ua.agent_id
+                INNER JOIN "${getTableName('Sessions')}" s ON s.agent_id = a.agent_id
+                WHERE ua.user_id = $1
+                  AND s.ended_at IS NULL
+                  AND s.started_at >= NOW() - INTERVAL '24 hours'
+                  AND (s.is_hidden IS NULL OR s.is_hidden = FALSE)
+                  AND (a.is_hidden IS NULL OR a.is_hidden = FALSE)
+                GROUP BY a.agent_id, a.name
+                ORDER BY active_session_count DESC, newest_session_start DESC
+            `;
+            params = [requesterId];
+        }
+
+        const result = await pool.query(query, params);
+
+        const agentsWithActiveSessions = result.rows.map(row => ({
+            agent_id: row.agent_id,
+            agent_name: row.agent_name,
+            active_session_count: parseInt(row.active_session_count || 0),
+            oldest_session_start: row.oldest_session_start,
+            newest_session_start: row.newest_session_start
+        }));
+
+        const totalActiveSessions = agentsWithActiveSessions.reduce((sum, a) => sum + a.active_session_count, 0);
+
+        res.json({
+            agents: agentsWithActiveSessions,
+            totalActiveSessions,
+            agentsWithActiveSessions: agentsWithActiveSessions.length
+        });
+    } catch (error) {
+        console.error('Error fetching active sessions:', error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -1032,16 +1292,27 @@ app.get('/api/sessions', async (req, res) => {
         query += ` ORDER BY s."${sortBy}" ${dbSortOrder} LIMIT $${paramCount + 1} OFFSET $${paramCount + 2} `;
         params.push(limitNum, offset);
 
-        const [dataRes, countRes, agentStatsRes] = await Promise.all([
+        const [dataRes, countRes] = await Promise.all([
             pool.query(query, params),
-            pool.query(countQuery, params.slice(0, paramCount)),
-            pool.query(agentStatsQuery, [agent_id])
+            pool.query(countQuery, params.slice(0, paramCount))
         ]);
 
-        const totalAgentSessions = parseInt(agentStatsRes.rows[0].total_sessions || 0);
-        const successAgentSessions = parseInt(agentStatsRes.rows[0].success_sessions || 0);
-        const zeroTurnSessions = parseInt(agentStatsRes.rows[0].zero_turn_sessions || 0);
-        const totalDuration = parseInt(agentStatsRes.rows[0].total_duration || 0);
+        let totalAgentSessions = 0;
+        let successAgentSessions = 0;
+        let zeroTurnSessions = 0;
+        let totalDuration = 0;
+
+        try {
+            const agentStatsRes = await pool.query(agentStatsQuery, [agent_id]);
+            if (agentStatsRes.rows.length > 0) {
+                totalAgentSessions = parseInt(agentStatsRes.rows[0].total_sessions || 0);
+                successAgentSessions = parseInt(agentStatsRes.rows[0].success_sessions || 0);
+                zeroTurnSessions = parseInt(agentStatsRes.rows[0].zero_turn_sessions || 0);
+                totalDuration = parseInt(agentStatsRes.rows[0].total_duration || 0);
+            }
+        } catch (err) {
+            console.error('Failed to fetch agent stats (ignoring to keep page alive):', err.message);
+        }
 
         res.json({
             data: dataRes.rows,
@@ -1265,7 +1536,7 @@ app.get('/api/users', async (req, res) => {
     let isMaster = false;
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         requesterId = decoded.userId;
         isMaster = decoded.isMaster && requesterId === 'master_root_0';
     } catch (err) {
@@ -1286,7 +1557,9 @@ app.get('/api/users', async (req, res) => {
         let query = `
             SELECT u.*,
             (SELECT COUNT(*) FROM "${getTableName('User_Agents')}" ua WHERE ua.user_id = u.user_id) as agent_count,
-    creator.email as creator_email
+    creator.email as creator_email,
+    creator.subscription_expiry as creator_subscription_expiry,
+    creator.minutes_balance as creator_minutes_balance
             FROM "${getTableName('Users')}" u
             LEFT JOIN "${getTableName('Users')}" creator ON u.created_by = creator.user_id
     `;
@@ -1349,6 +1622,11 @@ app.get('/api/users', async (req, res) => {
         }
 
         for (let user of users) {
+            if (user.role === 'user' && user.created_by) {
+                user.subscription_expiry = user.creator_subscription_expiry;
+                user.minutes_balance = user.creator_minutes_balance;
+            }
+
             if (user.role === 'super_admin') {
                 user.agents = allAgentIds;
                 user.agentCount = allAgentIds.length;
@@ -1411,7 +1689,7 @@ app.post('/api/users', async (req, res) => {
     let requesterId = null;
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         requesterId = decoded.userId;
     } catch (err) {
         if (err.name === 'JsonWebTokenError' || err.name === 'TokenExpiredError') {
@@ -1420,16 +1698,16 @@ app.post('/api/users', async (req, res) => {
         return res.status(500).json({ error: `Server authentication error (POST /api/users): ${err.message}` });
     }
 
-    const { email, role, subscriptionTier, agents } = req.body;
+    const { email, role, subscriptionTier, agents, subscription_expiry, minutes_balance } = req.body;
     const user_id = `user_${Date.now()}`;
-    const password = 'Password123!';
+    const password = generateTempPassword(); // Cryptographically random, unique per user
 
     try {
         let reqUser;
         if (requesterId === 'master_root_0') {
             reqUser = { role: 'super_admin' };
         } else {
-            const reqUserRes = await pool.query(`SELECT role FROM "${getTableName('Users')}" WHERE user_id = $1`, [requesterId]);
+            const reqUserRes = await pool.query(`SELECT role, minutes_balance FROM "${getTableName('Users')}" WHERE user_id = $1`, [requesterId]);
             reqUser = reqUserRes.rows[0];
         }
 
@@ -1443,13 +1721,56 @@ app.post('/api/users', async (req, res) => {
             return res.status(403).json({ error: 'Users cannot create other users.' });
         }
 
+        let userSubExpiry = null;
+        let userMinBalance = 0;
+
+        if (reqUser.role === 'super_admin' && role !== 'user') {
+            if (subscription_expiry) userSubExpiry = new Date(subscription_expiry);
+            if (minutes_balance) userMinBalance = parseInt(minutes_balance, 10) || 0;
+        }
+
+        // User Limit Check & Credit Deduction
+        if (requesterId !== 'master_root_0') {
+            const userCountRes = await pool.query(`SELECT COUNT(*) FROM "${getTableName('Users')}" WHERE created_by = $1`, [requesterId]);
+            const createdUserCount = parseInt(userCountRes.rows[0].count);
+
+            if (createdUserCount >= 2) {
+                if (!reqUser.minutes_balance || reqUser.minutes_balance < 500) {
+                    return res.status(402).json({ error: 'User limit reached. You need 500 credits to create an additional user. Please recharge.' });
+                }
+
+                // Deduct 500 Credits
+                await pool.query(
+                    `UPDATE "${getTableName('Users')}" SET minutes_balance = minutes_balance - 500, updated_at = NOW() WHERE user_id = $1`,
+                    [requesterId]
+                );
+                console.log(`💰 Deducted 500 credits from ${requesterId} for creating user above limit (has ${createdUserCount} users).`);
+            }
+        }
+
+        // Agent Assignment Constraint Check (Only one Admin can own an Agent)
+        if (role === 'admin' && agents && agents.length > 0) {
+            for (const agentId of agents) {
+                const constraintCheck = await pool.query(`
+                    SELECT u.email 
+                    FROM "${getTableName('User_Agents')}" ua
+                    JOIN "${getTableName('Users')}" u ON ua.user_id = u.user_id
+                    WHERE ua.agent_id = $1 AND u.role IN ('admin', 'super_admin') AND ua.user_id != $2
+                `, [agentId, user_id]);
+
+                if (constraintCheck.rows.length > 0) {
+                    return res.status(400).json({ error: `Agent ${agentId} is already assigned to Admin ${constraintCheck.rows[0].email}` });
+                }
+            }
+        }
+
         console.log(`👤 Creating user: ${email} (Role: ${role}, Created by: ${requesterId})`);
         // Create User
         await pool.query(`
             INSERT INTO "${getTableName('Users')}"
-    (user_id, email, password_hash, role, subscription_tier, is_active, must_change_password, created_by, created_at, updated_at)
-VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-    `, [user_id, email, password, role || 'user', subscriptionTier || 'free', true, true, requesterId, new Date(), new Date()]);
+    (user_id, email, password_hash, role, subscription_tier, is_active, must_change_password, created_by, created_at, updated_at, subscription_expiry, minutes_balance)
+VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    `, [user_id, email, password, role || 'user', subscriptionTier || 'free', true, true, requesterId, new Date(), new Date(), userSubExpiry, userMinBalance]);
 
         // Assign Agents
         if (agents && agents.length > 0) {
@@ -1493,7 +1814,7 @@ VALUES($1, $2)
 // Update User (Role, Subscription, etc.)
 app.put('/api/users/:userId', async (req, res) => {
     const { userId } = req.params;
-    const { role, subscriptionTier, isActive } = req.body;
+    const { role, subscriptionTier, isActive, subscription_expiry, minutes_balance } = req.body;
     const authHeader = req.headers.authorization;
     if (!authHeader) return res.status(401).json({ error: 'No token' });
 
@@ -1501,7 +1822,7 @@ app.put('/api/users/:userId', async (req, res) => {
     let requesterId = null;
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         requesterId = decoded.userId;
     } catch (err) {
         if (err.name === 'JsonWebTokenError' || err.name === 'TokenExpiredError') {
@@ -1556,6 +1877,16 @@ app.put('/api/users/:userId', async (req, res) => {
             updates.push(`is_active = $${params.length + 1} `);
             params.push(isActive);
         }
+        if (reqUser.role === 'super_admin' && role !== 'user') {
+            if (subscription_expiry !== undefined) {
+                updates.push(`subscription_expiry = $${params.length + 1} `);
+                params.push(subscription_expiry ? new Date(subscription_expiry) : null);
+            }
+            if (minutes_balance !== undefined) {
+                updates.push(`minutes_balance = $${params.length + 1} `);
+                params.push(parseInt(minutes_balance, 10) || 0);
+            }
+        }
 
         updates.push(`updated_at = $${params.length + 1} `);
         params.push(new Date());
@@ -1581,7 +1912,7 @@ app.post('/api/users/:userId/agents', async (req, res) => {
     if (!authHeader) return res.status(401).json({ error: 'No token' });
 
     try {
-        jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+        jwt.verify(authHeader.split(' ')[1], JWT_SECRET_ACTIVE);
     } catch (err) {
         return res.status(401).json({ error: 'Invalid or expired token' });
     }
@@ -1608,7 +1939,7 @@ app.put('/api/users/:userId/agents', async (req, res) => {
     if (!authHeader) return res.status(401).json({ error: 'No token' });
 
     try {
-        jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+        jwt.verify(authHeader.split(' ')[1], JWT_SECRET_ACTIVE);
     } catch (err) {
         return res.status(401).json({ error: 'Invalid or expired token' });
     }
@@ -1619,6 +1950,25 @@ app.put('/api/users/:userId/agents', async (req, res) => {
         await pool.query(`DELETE FROM "${getTableName('User_Agents')}" WHERE user_id = $1`, [userId]);
 
         if (agents && agents.length > 0) {
+            // Agent Assignment Constraint Check
+            const uRes = await pool.query(`SELECT role FROM "${getTableName('Users')}" WHERE user_id = $1`, [userId]);
+            const targetRole = uRes.rows[0]?.role;
+
+            if (targetRole === 'admin' || targetRole === 'super_admin') {
+                for (const agentId of agents) {
+                    const constraintCheck = await pool.query(`
+                        SELECT u.email 
+                        FROM "${getTableName('User_Agents')}" ua
+                        JOIN "${getTableName('Users')}" u ON ua.user_id = u.user_id
+                        WHERE ua.agent_id = $1 AND u.role IN ('admin', 'super_admin') AND ua.user_id != $2
+                    `, [agentId, userId]);
+
+                    if (constraintCheck.rows.length > 0) {
+                        return res.status(400).json({ error: `Agent ${agentId} is already assigned to Admin ${constraintCheck.rows[0].email}` });
+                    }
+                }
+            }
+
             for (const agentId of agents) {
                 await pool.query(`
                     INSERT INTO "${getTableName('User_Agents')}"(user_id, agent_id)
@@ -1644,7 +1994,7 @@ app.delete('/api/users/:userId', async (req, res) => {
     let requesterId = null;
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         requesterId = decoded.userId;
         isMaster = decoded.isMaster && requesterId === 'master_root_0';
     } catch (err) {
@@ -1762,7 +2112,7 @@ app.patch('/api/users/:userId/active', async (req, res) => {
     let requesterId = null;
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         requesterId = decoded.userId;
     } catch (err) {
         if (err.name === 'JsonWebTokenError' || err.name === 'TokenExpiredError') {
@@ -1840,7 +2190,7 @@ app.post('/api/users/:userId/reset-password', async (req, res) => {
     let requesterId = null;
 
     try {
-        const decoded = jwt.verify(tokenFromReq, JWT_SECRET);
+        const decoded = jwt.verify(tokenFromReq, JWT_SECRET_ACTIVE);
         requesterId = decoded.userId;
     } catch (err) {
         if (err.name === 'JsonWebTokenError' || err.name === 'TokenExpiredError') {
@@ -1947,7 +2297,7 @@ app.get('/api/user/dashboard', async (req, res) => {
     let userId = null;
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         userId = decoded.userId;
     } catch (err) {
         return res.status(401).json({ error: 'Invalid or expired token' });
@@ -2080,7 +2430,7 @@ app.get('/api/users/creators', async (req, res) => {
     if (!authHeader) return res.status(401).json({ error: 'No token' });
 
     try {
-        jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+        jwt.verify(authHeader.split(' ')[1], JWT_SECRET_ACTIVE);
     } catch (err) {
         return res.status(401).json({ error: 'Invalid or expired token' });
     }
@@ -2105,7 +2455,7 @@ app.patch('/api/user/conversations/:sessionId/review-status', async (req, res) =
 
     let userId = null;
     try {
-        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET_ACTIVE);
         userId = decoded.userId;
     } catch (err) {
         return res.status(401).json({ error: 'Invalid or expired token' });
@@ -2234,7 +2584,7 @@ app.post('/api/admin/users/:userId/agents/:agentId/mark-permission', async (req,
 
     let requesterId = null;
     try {
-        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET_ACTIVE);
         requesterId = decoded.userId;
     } catch (err) {
         return res.status(401).json({ error: 'Invalid or expired token' });
@@ -2314,7 +2664,7 @@ app.delete('/api/data-admin/sessions/:sessionId', async (req, res) => {
     if (!authHeader) return res.status(401).json({ error: 'No token' });
 
     try {
-        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET_ACTIVE);
         const isMaster = decoded.isMaster && decoded.userId === 'master_root_0';
 
         if (!isMaster) {
@@ -2358,7 +2708,7 @@ app.delete('/api/data-admin/agents/:agentId', async (req, res) => {
     if (!authHeader) return res.status(401).json({ error: 'No token' });
 
     try {
-        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET_ACTIVE);
         const isMaster = decoded.isMaster && decoded.userId === 'master_root_0';
 
         if (!isMaster) {
@@ -2418,7 +2768,7 @@ app.patch('/api/data-admin/conversations/:sessionId/summary', async (req, res) =
     if (!authHeader) return res.status(401).json({ error: 'No token' });
 
     try {
-        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET_ACTIVE);
         const isMaster = decoded.isMaster && decoded.userId === 'master_root_0';
 
         if (!isMaster) {
@@ -2460,7 +2810,7 @@ app.get('/api/data-admin/excluded', async (req, res) => {
     if (!authHeader) return res.status(401).json({ error: 'No token' });
 
     try {
-        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET_ACTIVE);
         const isMaster = decoded.isMaster && decoded.userId === 'master_root_0';
 
         if (!isMaster) {
@@ -2492,7 +2842,7 @@ app.delete('/api/data-admin/excluded/:itemType/:itemId', async (req, res) => {
     if (!authHeader) return res.status(401).json({ error: 'No token' });
 
     try {
-        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET_ACTIVE);
         const isMaster = decoded.isMaster && decoded.userId === 'master_root_0';
 
         if (!isMaster) {
@@ -2563,7 +2913,7 @@ app.delete('/api/data-admin/excluded-permanent/:itemType/:itemId', async (req, r
     if (!authHeader) return res.status(401).json({ error: 'No token' });
 
     try {
-        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET_ACTIVE);
         const isMaster = decoded.isMaster && decoded.userId === 'master_root_0';
 
         if (!isMaster) {
@@ -2607,7 +2957,7 @@ app.delete('/api/agents/:agentId', async (req, res) => {
     const token = authHeader.split(' ')[1];
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         const isMaster = decoded.isMaster && decoded.userId === 'master_root_0';
 
         let userRole = 'user';
@@ -2662,7 +3012,7 @@ app.post('/api/agents/:agentId/restore', async (req, res) => {
     const token = authHeader.split(' ')[1];
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         const isMaster = decoded.isMaster && decoded.userId === 'master_root_0';
 
         if (!isMaster) return res.status(403).json({ error: 'Only Master Admin can restore agents.' });
@@ -2696,7 +3046,7 @@ app.delete('/api/sessions/:sessionId', async (req, res) => {
     const token = authHeader.split(' ')[1];
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         const isMaster = decoded.isMaster && decoded.userId === 'master_root_0';
 
         let userRole = 'user';
@@ -2744,7 +3094,7 @@ app.post('/api/sessions/:sessionId/restore', async (req, res) => {
     const token = authHeader.split(' ')[1];
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         const isMaster = decoded.isMaster && decoded.userId === 'master_root_0';
 
         if (!isMaster) return res.status(403).json({ error: 'Only Master Admin can restore sessions.' });
@@ -2783,7 +3133,7 @@ app.post('/api/telephony/config', async (req, res) => {
     if (!authHeader) return res.status(401).json({ error: 'No token' });
     try {
         const token = authHeader.split(' ')[1];
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         // Allow Master Root or Super Admin or Admin
         if (!decoded.role && !decoded.isMaster) return res.status(403).json({ error: 'Access denied' });
 
@@ -2835,6 +3185,45 @@ app.post('/api/telephony/call', async (req, res) => {
             return res.status(400).json({ error: 'Missing call details' });
         }
 
+        const token = authHeader.split(' ')[1];
+        let requesterId = null;
+        try {
+            const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
+            requesterId = decoded.userId;
+        } catch (err) {
+            return res.status(401).json({ error: 'Invalid token' });
+        }
+
+        // Check Credit Balance
+        // Check Credit Balance
+        const userRes = await pool.query(`SELECT minutes_balance, role, created_by, subscription_expiry, is_active FROM "${getTableName('Users')}" WHERE user_id = $1`, [requesterId]);
+        const user = userRes.rows[0];
+
+        if (!user) return res.status(401).json({ error: 'User not found' });
+
+        let billableUser = user;
+
+        if (user.role === 'user' && user.created_by) {
+            const parentRes = await pool.query(`SELECT minutes_balance, subscription_expiry, is_active FROM "${getTableName('Users')}" WHERE user_id = $1`, [user.created_by]);
+            if (parentRes.rows[0]) {
+                billableUser = parentRes.rows[0];
+            }
+        }
+
+        // Check Subscription and Balance (Only for Admin and User roles)
+        const isExempt = user.role === 'super_admin' || requesterId === 'master_root_0';
+
+        if (!isExempt) {
+            if (!billableUser.is_active) return res.status(403).json({ error: 'Account deactivated' });
+            if (billableUser.subscription_expiry && new Date(billableUser.subscription_expiry) < new Date()) {
+                return res.status(403).json({ error: 'Subscription expired' });
+            }
+
+            if ((billableUser.minutes_balance || 0) <= 0) {
+                return res.status(403).json({ error: 'Insufficient call credits (Organization Balance Empty). Please contact admin.' });
+            }
+        }
+
         // 1. Get Config
         const configResult = await pool.query(`SELECT * FROM "${getTableName('Agent_Telephony_Config')}" WHERE agent_id = $1`, [agentId]);
         const config = configResult.rows[0];
@@ -2878,9 +3267,23 @@ app.post('/api/telephony/call', async (req, res) => {
         const numbers = Array.isArray(receiverNumber) ? receiverNumber : [receiverNumber];
         const names = Array.isArray(receiverName) ? receiverName : [receiverName]; // Handle names array if provided
 
+        const recordActiveCall = async (sid) => {
+            if (!sid) return;
+            try {
+                await pool.query(
+                    `INSERT INTO "${getTableName('ActiveCalls')}" (call_sid, user_id, start_time, created_at, updated_at) VALUES ($1, $2, NOW(), NOW(), NOW())`,
+                    [sid, requesterId]
+                );
+            } catch (err) {
+                console.error('Failed to record active call:', err);
+            }
+        };
+
         if (numbers.length === 1) {
             // Single Call (Maintain legacy response format for compatibility)
             const response = await initiateSingleCall(numbers[0], names[0]);
+            const sid = response.data?.Call?.Sid;
+            await recordActiveCall(sid);
             return res.json({ success: true, data: response.data });
         } else {
             // Bulk Call - Line-aware sequential processing
@@ -2910,36 +3313,39 @@ app.post('/api/telephony/call', async (req, res) => {
             });
 
             // Execute calls in batches respecting line limits
-            const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-            let successCount = 0;
-            let failCount = 0;
+            (async () => {
+                const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+                let successCount = 0;
+                let failCount = 0;
 
-            for (let i = 0; i < numbers.length; i += callsLines) {
-                // Send a batch of up to callsLines calls concurrently
-                const batch = numbers.slice(i, i + callsLines);
-                const batchNames = names.slice(i, i + callsLines);
+                for (let i = 0; i < numbers.length; i += callsLines) {
+                    // Send a batch of up to callsLines calls concurrently
+                    const batch = numbers.slice(i, i + callsLines);
+                    const batchNames = names.slice(i, i + callsLines);
 
-                const batchPromises = batch.map(async (num, idx) => {
-                    try {
-                        await initiateSingleCall(num, batchNames[idx] || '');
-                        successCount++;
-                        console.log(`✅ Call ${i + idx + 1}/${numbers.length} to ${num} - SUCCESS`);
-                    } catch (callErr) {
-                        failCount++;
-                        console.error(`❌ Call ${i + idx + 1}/${numbers.length} to ${num} - FAILED:`, callErr.response?.data?.RestException?.Message || callErr.message);
+                    const batchPromises = batch.map(async (num, idx) => {
+                        try {
+                            const response = await initiateSingleCall(num, batchNames[idx] || '');
+                            const sid = response.data?.Call?.Sid;
+                            if (sid) await recordActiveCall(sid);
+                            successCount++;
+                            console.log(`✅ Call ${i + idx + 1}/${numbers.length} to ${num} - SUCCESS (SID: ${sid})`);
+                        } catch (callErr) {
+                            failCount++;
+                            console.error(`❌ Call ${i + idx + 1}/${numbers.length} to ${num} - FAILED:`, callErr.response?.data?.RestException?.Message || callErr.message);
+                        }
+                    });
+
+                    await Promise.all(batchPromises);
+
+                    // Wait before sending the next batch (skip wait after the last batch)
+                    if (i + callsLines < numbers.length) {
+                        console.log(`⏳ Waiting ${callInterval}s before next batch (lines in use)...`);
+                        await sleep(callInterval * 1000);
                     }
-                });
-
-                await Promise.all(batchPromises);
-
-                // Wait before sending the next batch (skip wait after the last batch)
-                if (i + callsLines < numbers.length) {
-                    console.log(`⏳ Waiting ${callInterval}s before next batch (lines in use)...`);
-                    await sleep(callInterval * 1000);
                 }
-            }
-
-            console.log(`📊 Bulk call complete: ${successCount} success, ${failCount} failed out of ${numbers.length}`);
+                console.log(`📊 Bulk call complete: ${successCount} success, ${failCount} failed out of ${numbers.length}`);
+            })();
         }
 
     } catch (err) {
@@ -3027,14 +3433,14 @@ app.get('/api/proxy-recording', async (req, res) => {
 });
 
 // Serve static files from the React app
-
 const distPath = path.join(__dirname, '../dist');
 if (fs.existsSync(distPath)) {
     app.use(express.static(distPath));
-    // Handle SPA routing - use regex for Express 5 compatibility
-    app.get(/^(?!\/api).*$/, (req, res) => {
+    // Catch-all for SPA routing - exclude API and Exotel routes
+    app.get(/^(?!\/api|\/exotel).*$/, (req, res) => {
         res.sendFile(path.join(distPath, 'index.html'));
     });
+    console.log(`📦 Serving production React build from: ${distPath}`);
 } else {
     console.warn('⚠️ dist folder not found. Frontend will not be served statically.');
 }
@@ -3046,7 +3452,7 @@ app.get('/api/system/status', async (req, res) => {
     const token = authHeader.split(' ')[1];
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         // Strict Master Check
         if (!decoded.isMaster || decoded.userId !== 'master_root_0') {
             return res.status(403).json({ error: 'Access denied' });
@@ -3102,7 +3508,7 @@ app.get('/api/settings', async (req, res) => {
     const token = authHeader.split(' ')[1];
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         const requesterId = decoded.userId;
         const isMaster = decoded.isMaster && requesterId === 'master_root_0';
 
@@ -3139,7 +3545,7 @@ app.put('/api/settings', async (req, res) => {
     const token = authHeader.split(' ')[1];
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
         const requesterId = decoded.userId;
         const isMaster = decoded.isMaster && requesterId === 'master_root_0';
         let updatedBy = 'master';
@@ -3216,5 +3622,5 @@ app.get('/api/settings/throttle', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
     await initDatabase();
-    console.log(`Server running on port ${PORT} `);
+    console.log(`✅ Server running on port ${PORT} (${APP_ENV} mode)`);
 });

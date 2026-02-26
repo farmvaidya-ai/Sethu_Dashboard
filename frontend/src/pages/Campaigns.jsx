@@ -4,6 +4,7 @@ import toast from 'react-hot-toast';
 
 import { Phone, Upload, Calendar, Play, FileText, CheckCircle, AlertCircle, RefreshCw, X, ArrowLeft } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
 
 export default function Campaigns() {
     const [campaigns, setCampaigns] = useState([]);
@@ -12,6 +13,7 @@ export default function Campaigns() {
     const [selectedCampaign, setSelectedCampaign] = useState(null); // For details view
     const [callDetails, setCallDetails] = useState([]);
     const [detailsLoading, setDetailsLoading] = useState(false);
+    const { user: authUser } = useAuth();
 
     // Agent Selection
     const [viewMode, setViewMode] = useState('agent-selection'); // 'agent-selection', 'list', 'details'
@@ -416,12 +418,14 @@ export default function Campaigns() {
                     >
                         <RefreshCw size={18} className={loading ? 'animate-spin' : ''} />
                     </button>
-                    <button
-                        onClick={() => setShowModal(true)}
-                        className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2.5 rounded-lg hover:bg-indigo-700 transition-colors shadow-sm font-semibold text-sm"
-                    >
-                        <Upload size={18} /> New Campaign
-                    </button>
+                    {authUser?.role !== 'user' && (
+                        <button
+                            onClick={() => setShowModal(true)}
+                            className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2.5 rounded-lg hover:bg-indigo-700 transition-colors shadow-sm font-semibold text-sm"
+                        >
+                            <Upload size={18} /> New Campaign
+                        </button>
+                    )}
                 </div>
             </div>
 
@@ -523,9 +527,11 @@ export default function Campaigns() {
                                                 <button onClick={() => setShowAllCampaigns(true)} className="text-indigo-600 hover:text-indigo-800 text-sm font-medium underline">
                                                     Show All Instead
                                                 </button>
-                                                <button onClick={() => setShowModal(true)} className="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors">
-                                                    Create New Campaign
-                                                </button>
+                                                {authUser?.role !== 'user' && (
+                                                    <button onClick={() => setShowModal(true)} className="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors">
+                                                        Create New Campaign
+                                                    </button>
+                                                )}
                                             </div>
                                         </div>
                                     ) : (

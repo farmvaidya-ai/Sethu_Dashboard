@@ -11,6 +11,8 @@ import ChangePassword from './pages/ChangePassword';
 import ForgotPassword from './pages/ForgotPassword';
 import ResetPassword from './pages/ResetPassword';
 import SystemStatus from './pages/SystemStatus';
+import Billing from './pages/Billing';
+import UsageHistory from './pages/UsageHistory';
 import Settings from './pages/Settings';
 
 import Header from './components/Header';
@@ -116,6 +118,16 @@ function AppRoutes() {
       <Route path="/user/session/:sessionId" element={
         <PrivateRoute>
           <SessionDetails />
+        </PrivateRoute>
+      } />
+      <Route path="/admin/billing" element={
+        <PrivateRoute adminOnly={true}>
+          <Billing />
+        </PrivateRoute>
+      } />
+      <Route path="/admin/usage-history" element={
+        <PrivateRoute adminOnly={true}>
+          <UsageHistory />
         </PrivateRoute>
       } />
 

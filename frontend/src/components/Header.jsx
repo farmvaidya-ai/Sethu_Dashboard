@@ -1,7 +1,8 @@
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { LogOut, Users, Lock, Settings } from 'lucide-react';
+import { LogOut, Users, Lock, Settings, Bell, Check, Trash2 } from 'lucide-react';
+import { notificationsAPI } from '../services/api';
 
 export default function Header() {
   const { user, logout, isAdmin } = useAuth();
@@ -24,6 +25,43 @@ export default function Header() {
     await logout();
     navigate('/login');
   };
+
+  const [notifications, setNotifications] = useState([]);
+  const [showNotifications, setShowNotifications] = useState(false);
+
+  const fetchNotifications = async () => {
+    try {
+      const res = await notificationsAPI.getNotifications();
+      if (res.data?.success) setNotifications(res.data.notifications);
+    } catch (err) {
+      console.error("Failed to load notifications", err);
+    }
+  };
+
+  useEffect(() => {
+    if (user) {
+      fetchNotifications();
+      const interval = setInterval(fetchNotifications, 60000); // Poll every minute
+      return () => clearInterval(interval);
+    }
+  }, [user]);
+
+  const handleMarkAsRead = async (id, e) => {
+    e.stopPropagation();
+    try {
+      await notificationsAPI.markAsRead(id);
+      setNotifications(notifications.map(n => n.id === id ? { ...n, is_read: true } : n));
+    } catch (err) { }
+  };
+
+  const handleMarkAllAsRead = async () => {
+    try {
+      await notificationsAPI.markAllAsRead();
+      setNotifications(notifications.map(n => ({ ...n, is_read: true })));
+    } catch (err) { }
+  };
+
+  const unreadCount = notifications.filter(n => !n.is_read).length;
 
   return (
     <header className="app-header">
@@ -65,18 +103,70 @@ export default function Header() {
             </h1>
           </div>
 
-          <div className="brand-right" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            {user?.email && (
-              <span style={{ fontSize: '0.9rem', color: '#64748b', marginRight: '8px', fontWeight: '500' }}>
-                {user.email}
-              </span>
-            )}
-            <button onClick={() => navigate('/change-password')} className="action-icon-btn" title="Change Password">
-              <Lock size={18} />
-            </button>
-            <button onClick={handleLogout} className="logout-btn-minimal" title="Logout">
-              <LogOut size={18} />
-            </button>
+          <div className="brand-right" style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              {user?.email && (
+                <span style={{ fontSize: '0.9rem', color: '#64748b', marginRight: '4px', fontWeight: '500' }}>
+                  {user.email}
+                </span>
+              )}
+              <button onClick={() => navigate('/change-password')} className="action-icon-btn" title="Change Password">
+                <Lock size={18} />
+              </button>
+              <div style={{ position: 'relative' }}>
+                <button onClick={() => setShowNotifications(!showNotifications)} className="action-icon-btn" title="Notifications">
+                  <Bell size={18} />
+                  {unreadCount > 0 && (
+                    <span style={{ position: 'absolute', top: 0, right: 0, background: '#ef4444', color: 'white', borderRadius: '50%', width: '16px', height: '16px', fontSize: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>
+                      {unreadCount > 9 ? '9+' : unreadCount}
+                    </span>
+                  )}
+                </button>
+
+                {showNotifications && (
+                  <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: '8px', width: '320px', background: 'white', borderRadius: '8px', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)', border: '1px solid #e2e8f0', zIndex: 3000, overflow: 'hidden' }}>
+                    <div style={{ padding: '12px 16px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#f8fafc' }}>
+                      <h3 style={{ margin: 0, fontSize: '14px', fontWeight: '600', color: '#1e293b' }}>Notifications</h3>
+                      {unreadCount > 0 && (
+                        <button onClick={handleMarkAllAsRead} style={{ background: 'none', border: 'none', color: '#008F4B', fontSize: '12px', cursor: 'pointer', fontWeight: '500' }}>
+                          Mark all read
+                        </button>
+                      )}
+                    </div>
+                    <div style={{ maxHeight: '350px', overflowY: 'auto' }}>
+                      {notifications.length === 0 ? (
+                        <div style={{ padding: '24px 16px', textAlign: 'center', color: '#64748b', fontSize: '13px' }}>
+                          No notifications
+                        </div>
+                      ) : (
+                        notifications.map(n => (
+                          <div key={n.id} style={{ padding: '12px 16px', borderBottom: '1px solid #f1f5f9', background: n.is_read ? 'white' : '#f0fdf4', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                              <span style={{ fontSize: '13px', fontWeight: '600', color: '#1e293b' }}>{n.title}</span>
+                              {!n.is_read && (
+                                <button onClick={(e) => handleMarkAsRead(n.id, e)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px', color: '#008F4B' }} title="Mark as read">
+                                  <Check size={14} />
+                                </button>
+                              )}
+                            </div>
+                            <p style={{ margin: 0, fontSize: '12px', color: '#475569', lineHeight: '1.4' }}>{n.message}</p>
+                            <span style={{ fontSize: '10px', color: '#94a3b8', marginTop: '4px' }}>
+                              {new Date(n.created_at).toLocaleString()}
+                            </span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <button onClick={handleLogout} className="logout-btn-minimal" title="Logout">
+                <LogOut size={18} />
+              </button>
+            </div>
           </div>
         </div>
 
@@ -138,12 +228,52 @@ export default function Header() {
                       </button>
                     )}
 
+                    <button
+                      onClick={() => navigate('/admin/billing')}
+                      className={`nav-link-btn ${location.pathname === '/admin/billing' ? 'active' : ''}`}
+                    >
+                      Billing
+                    </button>
                   </>
                 )}
               </nav>
             </div>
 
             <div className="nav-tier-right">
+              {/* Credits Display (Sticky) */}
+              {/* Credits Display (Sticky) */}
+              {(user?.minutes_balance !== undefined) && (
+                <div
+                  onClick={() => navigate('/admin/usage-history')}
+                  title="View Minutes Ledger"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    background: 'rgba(241, 245, 249, 0.8)',
+                    padding: '4px 10px',
+                    borderRadius: '16px',
+                    border: '1px solid #e2e8f0',
+                    fontSize: '0.8rem',
+                    fontWeight: '600',
+                    color: '#475569',
+                    marginRight: '8px',
+                    cursor: 'pointer',
+                    userSelect: 'none',
+                    transition: 'all 0.2s',
+                  }}
+                  onMouseEnter={(e) => e.currentTarget.style.background = '#e2e8f0'}
+                  onMouseLeave={(e) => e.currentTarget.style.background = 'rgba(241, 245, 249, 0.8)'}
+                >
+                  <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: (user.minutes_balance > 100) ? '#10b981' : '#ef4444' }}></div>
+                  {(() => {
+                    const mins = Math.floor(user.minutes_balance);
+                    const secs = Math.round((user.minutes_balance - mins) * 60);
+                    return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
+                  })()}
+                </div>
+              )}
+
               <div
                 className="user-role-badge"
                 title={user?.email}
@@ -403,6 +533,6 @@ export default function Header() {
            letter-spacing: -0.5px;
         }
       `}</style>
-    </header>
+    </header >
   );
 }

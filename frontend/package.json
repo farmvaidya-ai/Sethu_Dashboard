@@ -8,6 +8,7 @@
     "server": "node server/index.js",
     "start": "npx kill-port 3000 5173 && concurrently \"npm run server\" \"npm run dev\"",
     "build": "vite build",
+    "start:prod": "npm run build && node server/index.js",
     "lint": "eslint .",
     "preview": "vite preview"
   },
@@ -22,6 +23,7 @@
     "multer": "^2.0.2",
     "nodemailer": "^7.0.13",
     "pg": "^8.17.2",
+    "razorpay": "^2.9.6",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-hot-toast": "^2.6.0",

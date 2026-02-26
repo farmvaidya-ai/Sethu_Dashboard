@@ -45,6 +45,7 @@ api.interceptors.response.use(
 export const adminAPI = {
     getAllAgents: (params) => api.get('/api/agents', { params }),
     getStats: () => api.get('/api/stats'),
+    getActiveSessions: () => api.get('/api/active-sessions'),
     deleteAgent: (agentId, permanent) => api.delete(`/api/agents/${agentId}`, { params: { permanent } }),
     deleteSession: (sessionId, permanent) => api.delete(`/api/sessions/${sessionId}`, { params: { permanent } }),
     restoreAgent: (agentId) => api.post(`/api/agents/${agentId}/restore`),
@@ -107,6 +108,16 @@ export const campaignAPI = {
     resumeCampaign: (campaignId) => api.post(`/api/campaigns/${campaignId}/resume`),
 };
 
+export const paymentAPI = {
+    createSubscription: () => api.post('/api/payment/subscription/create'),
+    createRecharge: (amount) => api.post('/api/payment/minutes/create', { amount }),
+    verifyPayment: (data) => api.post('/api/payment/verify', data),
+    getBalances: () => api.get('/api/payment/balances'),
+    getTransactionHistory: (filter = 'all', page = 1, limit = 50) => api.get('/api/payment/history', { params: { filter, page, limit } }),
+    adjustCredits: (amount, targetUserId) => api.post('/api/payment/adjust-credits', { amount, targetUserId })
+};
+
+
 // Settings APIs
 export const settingsAPI = {
     getSettings: () => api.get('/api/settings'),
@@ -114,5 +125,10 @@ export const settingsAPI = {
     getThrottleSettings: () => api.get('/api/settings/throttle'),
 };
 
+export const notificationsAPI = {
+    getNotifications: () => api.get('/api/notifications'),
+    markAsRead: (id) => api.patch(`/api/notifications/${id}/read`),
+    markAllAsRead: () => api.patch('/api/notifications/read-all'),
+};
 
 export default api;
