@@ -171,7 +171,7 @@ export default function AdminUsers() {
           role: editingUser.role,
           low_balance_threshold: parseInt(editingUser.low_balance_threshold) || 50,
           subscription_expiry: editingUser.subscription_expiry || null,
-          minutes_balance: parseInt(editingUser.minutes_balance) || 0
+          minutes_balance: parseFloat(editingUser.minutes_balance) || 0
         })
       ]);
       setShowEditAgentsModal(false);
@@ -393,7 +393,7 @@ export default function AdminUsers() {
                     <td>
                       <div className="creator-info" style={{ display: 'flex', flexDirection: 'column' }}>
                         <span>Exp: {user.subscription_expiry ? new Date(user.subscription_expiry).toLocaleDateString() : 'None'}</span>
-                        <span style={{ color: '#008F4B', fontWeight: 'bold' }}>{user.minutes_balance || 0} Credits</span>
+                        <span style={{ color: '#008F4B', fontWeight: 'bold' }}>{parseFloat(user.minutes_balance || 0).toFixed(2)} Credits</span>
                       </div>
                     </td>
                     <td>
@@ -739,14 +739,18 @@ export default function AdminUsers() {
         {/* Generic Confirmation Modal */}
         {showConfirmModal && (
           <div className="modal-overlay" onClick={() => setShowConfirmModal(false)}>
-            <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '400px' }}>
-              <h2 style={{ color: confirmConfig.type === 'danger' ? '#e53e3e' : '#2d3748' }}>
-                {confirmConfig.type === 'danger' ? 'Confirm Action' : 'Please Confirm'}
-              </h2>
-              <p style={{ margin: '20px 0', fontSize: '16px', lineHeight: '1.5' }}>
-                {confirmConfig.message}
-              </p>
-              <div className="modal-actions" style={{ marginTop: '24px' }}>
+            <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '420px', padding: 0 }}>
+              <div className="modal-header" style={{ borderBottom: 'none', paddingBottom: '0' }}>
+                <h2 style={{ color: confirmConfig.type === 'danger' ? '#e53e3e' : '#2d3748', fontSize: '1.4rem' }}>
+                  {confirmConfig.type === 'danger' ? 'Confirm Action' : 'Please Confirm'}
+                </h2>
+              </div>
+              <div className="modal-body" style={{ padding: '16px 28px', overflowY: 'visible' }}>
+                <p style={{ margin: '0', fontSize: '15px', lineHeight: '1.6', color: '#4a5568', wordBreak: 'break-word' }}>
+                  {confirmConfig.message}
+                </p>
+              </div>
+              <div className="modal-actions" style={{ marginTop: 'auto', padding: '20px 28px', background: '#f8fafc', borderTop: '1px solid #e2e8f0', borderRadius: '0 0 12px 12px' }}>
                 <button
                   onClick={() => setShowConfirmModal(false)}
                   className="cancel-btn"

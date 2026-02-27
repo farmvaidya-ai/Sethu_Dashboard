@@ -266,11 +266,7 @@ export default function Header() {
                   onMouseLeave={(e) => e.currentTarget.style.background = 'rgba(241, 245, 249, 0.8)'}
                 >
                   <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: (user.minutes_balance > 100) ? '#10b981' : '#ef4444' }}></div>
-                  {(() => {
-                    const mins = Math.floor(user.minutes_balance);
-                    const secs = Math.round((user.minutes_balance - mins) * 60);
-                    return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
-                  })()}
+                  {parseFloat(user.minutes_balance || 0).toFixed(2)} Credits
                 </div>
               )}
 

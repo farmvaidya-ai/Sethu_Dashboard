@@ -10,12 +10,14 @@ const ITEMS_PER_PAGE = 10;
 
 const confirmToast = (message, onConfirm) => {
     toast((t) => (
-        <div style={{ minWidth: '250px' }}>
-            <p style={{ margin: '0 0 10px 0', fontSize: '14px', color: '#1f2937' }}>{message}</p>
-            <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+        <div style={{ width: '100%', minWidth: '280px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            <p style={{ margin: 0, fontSize: '14px', color: '#1f2937', lineHeight: '1.4', wordBreak: 'break-word' }}>
+                {message}
+            </p>
+            <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '4px' }}>
                 <button
                     onClick={() => toast.dismiss(t.id)}
-                    style={{ padding: '6px 12px', border: '1px solid #d1d5db', borderRadius: '6px', background: 'white', cursor: 'pointer', fontSize: '13px', color: '#374151' }}
+                    style={{ padding: '6px 14px', border: '1px solid #d1d5db', borderRadius: '6px', background: 'white', cursor: 'pointer', fontSize: '13px', color: '#374151', fontWeight: '500' }}
                 >
                     Cancel
                 </button>
@@ -24,13 +26,22 @@ const confirmToast = (message, onConfirm) => {
                         toast.dismiss(t.id);
                         onConfirm();
                     }}
-                    style={{ padding: '6px 12px', border: 'none', borderRadius: '6px', background: '#ef4444', color: 'white', cursor: 'pointer', fontSize: '13px', fontWeight: '500' }}
+                    style={{ padding: '6px 14px', border: 'none', borderRadius: '6px', background: '#ef4444', color: 'white', cursor: 'pointer', fontSize: '13px', fontWeight: '600', boxShadow: '0 1px 2px rgba(0,0,0,0.1)' }}
                 >
                     Confirm
                 </button>
             </div>
         </div>
-    ), { duration: 6000, position: 'top-center', style: { borderLeft: '4px solid #ef4444' } });
+    ), {
+        duration: 8000,
+        position: 'top-center',
+        style: {
+            borderLeft: '4px solid #ef4444',
+            maxWidth: '400px',
+            padding: '16px',
+            boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1)'
+        }
+    });
 };
 
 export default function Dashboard() {
