@@ -26,5 +26,6 @@ router.post('/verify', authenticate, paymentController.verifyPayment);
 router.get('/balances', authenticate, paymentController.getBalances);
 router.get('/history', authenticate, paymentController.getTransactionHistory);
 router.post('/adjust-credits', authenticate, paymentController.adjustCredits);
+router.get('/heatmap', authenticate, paymentController.getUsageHeatmap);
 
 export default router;

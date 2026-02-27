@@ -2073,7 +2073,11 @@ app.delete('/api/users/:userId', async (req, res) => {
                 });
             }
 
-            // Delete Child Users
+            // Delete Child Users (clear dependent tables first)
+            for (const child of childUsers) {
+                await pool.query(`DELETE FROM "${getTableName('Notifications')}" WHERE user_id = $1`, [child.user_id]);
+                await pool.query(`DELETE FROM "${getTableName('User_Agents')}" WHERE user_id = $1`, [child.user_id]);
+            }
             await pool.query(`DELETE FROM "${getTableName('Users')}" WHERE created_by = $1`, [userId]);
         }
 
@@ -2094,7 +2098,9 @@ app.delete('/api/users/:userId', async (req, res) => {
             }).catch(e => console.error(`Failed to send delete email to ${target.email}: `, e));
         }
 
-        // Delete the Target User
+        // Delete Target User (clear dependent tables first)
+        await pool.query(`DELETE FROM "${getTableName('Notifications')}" WHERE user_id = $1`, [userId]);
+        await pool.query(`DELETE FROM "${getTableName('User_Agents')}" WHERE user_id = $1`, [userId]);
         await pool.query(`DELETE FROM "${getTableName('Users')}" WHERE user_id = $1`, [userId]);
         res.json({ success: true });
     } catch (err) {
@@ -2720,23 +2726,27 @@ app.delete('/api/data-admin/agents/:agentId', async (req, res) => {
 
         const { agentId } = req.params;
 
-        // Get all sessions for this agent
+        // Get ALL sessions for this agent (including hidden ones)
         const sessions = await pool.query(`SELECT session_id FROM "${getTableName('Sessions')}" WHERE agent_id = $1`, [agentId]);
 
-        // Delete all conversations for these sessions
+        // Delete all dependent data for these sessions in correct FK order
         for (const session of sessions.rows) {
+            // 1. Delete Conversations first (they reference Sessions)
             await pool.query(`DELETE FROM "${getTableName('Conversations')}" WHERE session_id = $1`, [session.session_id]);
 
-            // Exclude each session
+            // 2. Exclude each session in recycle bin
             await pool.query(`
                 INSERT INTO "${getTableName('Excluded_Items')}"(item_type, item_id, excluded_by, reason)
-VALUES($1, $2, $3, $4)
+                VALUES($1, $2, $3, $4)
                 ON CONFLICT(item_type, item_id) DO NOTHING
             `, ['session', session.session_id, decoded.userId, 'Parent agent deleted']);
         }
 
-        // Delete all sessions for this agent
+        // Delete all sessions for this agent (safe now that conversations are gone)
         await pool.query(`DELETE FROM "${getTableName('Sessions')}" WHERE agent_id = $1`, [agentId]);
+
+        // Delete User_Agents assignments
+        await pool.query(`DELETE FROM "${getTableName('User_Agents')}" WHERE agent_id = $1`, [agentId]);
 
         // Delete agent
         await pool.query(`DELETE FROM "${getTableName('Agents')}" WHERE agent_id = $1`, [agentId]);
@@ -2801,6 +2811,83 @@ app.patch('/api/data-admin/conversations/:sessionId/summary', async (req, res) =
     } catch (err) {
         console.error('Update summary error:', err.message);
         res.status(500).json({ error: 'Failed to update summary' });
+    }
+});
+
+// ==================== MASTER ADMIN EDIT ENDPOINTS ====================
+
+// Master: Edit conversation turns
+app.patch('/api/master/conversations/:sessionId/turns', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'No token' });
+    try {
+        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET_ACTIVE);
+        if (!(decoded.isMaster && decoded.userId === 'master_root_0')) {
+            return res.status(403).json({ error: 'Only Master Admin can edit conversations' });
+        }
+        const { sessionId } = req.params;
+        const { turns } = req.body;
+        if (!Array.isArray(turns)) return res.status(400).json({ error: 'turns must be an array' });
+        await pool.query(`UPDATE "${getTableName('Conversations')}" SET turns = $1, total_turns = $2 WHERE session_id = $3`,
+            [JSON.stringify(turns), turns.length, sessionId]);
+        console.log(`✏️ [Master] Conversation turns edited for ${sessionId}`);
+        res.json({ success: true, message: 'Conversation updated' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Master: Edit session metadata (started_at, ended_at, agent_name, etc.)
+app.patch('/api/master/sessions/:sessionId', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'No token' });
+    try {
+        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET_ACTIVE);
+        if (!(decoded.isMaster && decoded.userId === 'master_root_0')) {
+            return res.status(403).json({ error: 'Only Master Admin can edit sessions' });
+        }
+        const { sessionId } = req.params;
+        const { started_at, ended_at, duration_seconds, agent_name, status } = req.body;
+        const updates = [];
+        const vals = [];
+        let i = 1;
+        if (started_at !== undefined) { updates.push(`started_at = $${i++}`); vals.push(started_at); }
+        if (ended_at !== undefined) { updates.push(`ended_at = $${i++}`); vals.push(ended_at); }
+        if (duration_seconds !== undefined) { updates.push(`duration_seconds = $${i++}`); vals.push(duration_seconds); }
+        if (agent_name !== undefined) { updates.push(`agent_name = $${i++}`); vals.push(agent_name); }
+        if (status !== undefined) { updates.push(`status = $${i++}`); vals.push(status); }
+        if (updates.length === 0) return res.status(400).json({ error: 'No fields to update' });
+        vals.push(sessionId);
+        await pool.query(`UPDATE "${getTableName('Sessions')}" SET ${updates.join(', ')} WHERE session_id = $${i}`, vals);
+        console.log(`✏️ [Master] Session ${sessionId} metadata edited`);
+        res.json({ success: true, message: 'Session updated' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Master: Edit a specific conversation turn (single turn by index)
+app.patch('/api/master/conversations/:sessionId/turn/:turnIndex', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'No token' });
+    try {
+        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET_ACTIVE);
+        if (!(decoded.isMaster && decoded.userId === 'master_root_0')) {
+            return res.status(403).json({ error: 'Only Master Admin can edit conversations' });
+        }
+        const { sessionId, turnIndex } = req.params;
+        const { user_message, assistant_message } = req.body;
+        const idx = parseInt(turnIndex, 10);
+        const convRes = await pool.query(`SELECT turns FROM "${getTableName('Conversations')}" WHERE session_id = $1`, [sessionId]);
+        if (!convRes.rows[0]) return res.status(404).json({ error: 'Conversation not found' });
+        const turns = convRes.rows[0].turns || [];
+        if (idx < 0 || idx >= turns.length) return res.status(400).json({ error: 'Invalid turn index' });
+        if (user_message !== undefined) turns[idx].user_message = user_message;
+        if (assistant_message !== undefined) turns[idx].assistant_message = assistant_message;
+        await pool.query(`UPDATE "${getTableName('Conversations')}" SET turns = $1 WHERE session_id = $2`, [JSON.stringify(turns), sessionId]);
+        res.json({ success: true, message: 'Turn updated', turn: turns[idx] });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
 });
 
@@ -2922,22 +3009,41 @@ app.delete('/api/data-admin/excluded-permanent/:itemType/:itemId', async (req, r
 
         const { itemType, itemId } = req.params;
 
-        // Remove from exclusion list permanently
-        const result = await pool.query(`
-            DELETE FROM "${getTableName('Excluded_Items')}"
+        // Check item exists in exclusion list
+        const existing = await pool.query(`
+            SELECT id, item_name FROM "${getTableName('Excluded_Items')}"
             WHERE item_type = $1 AND item_id = $2
-            RETURNING id, item_name
         `, [itemType, itemId]);
 
-        if (result.rowCount === 0) {
+        if (existing.rowCount === 0) {
             return res.status(404).json({ error: 'Item not found in recycle bin.' });
         }
 
-        console.log(`🗑️ Permanently removed ${itemType} "${result.rows[0].item_name || itemId}" from recycle bin by ${decoded.userId}`);
+        const itemName = existing.rows[0].item_name || itemId;
+
+        // ✅ CRITICAL: Delete actual data from database (in FK-safe order)
+        if (itemType === 'agent') {
+            // Delete all conversations for this agent's sessions first
+            const agentSessions = await pool.query(`SELECT session_id FROM "${getTableName('Sessions')}" WHERE agent_id = $1`, [itemId]);
+            for (const s of agentSessions.rows) {
+                await pool.query(`DELETE FROM "${getTableName('Conversations')}" WHERE session_id = $1`, [s.session_id]);
+            }
+            await pool.query(`DELETE FROM "${getTableName('Sessions')}" WHERE agent_id = $1`, [itemId]);
+            await pool.query(`DELETE FROM "${getTableName('User_Agents')}" WHERE agent_id = $1`, [itemId]);
+            await pool.query(`DELETE FROM "${getTableName('Agents')}" WHERE agent_id = $1`, [itemId]);
+        } else if (itemType === 'session') {
+            await pool.query(`DELETE FROM "${getTableName('Conversations')}" WHERE session_id = $1`, [itemId]);
+            await pool.query(`DELETE FROM "${getTableName('Sessions')}" WHERE session_id = $1`, [itemId]);
+        }
+
+        // ✅ KEEP in Excluded_Items so the sync script NEVER re-creates it!
+        // (do NOT delete from Excluded_Items — that's what was broken before)
+
+        console.log(`🗑️ Permanently removed ${itemType} "${itemName}" data from recycle bin by ${decoded.userId}`);
 
         res.json({
             success: true,
-            message: `${itemType} permanently removed from recycle bin. It will NOT be re-synced.`
+            message: `${itemType} "${itemName}" permanently deleted. It will NOT be re-synced.`
         });
 
     } catch (err) {
@@ -2987,10 +3093,17 @@ VALUES('agent', $1, $2, $3, 'Permanent Delete by Master')
                 ON CONFLICT(item_type, item_id) DO UPDATE SET excluded_at = CURRENT_TIMESTAMP
     `, [agentId, agentName, decoded.userId]);
 
-            // Hard Delete
+            // Hard Delete — must respect FK: Conversations → Sessions → Agents
             await pool.query(`DELETE FROM "${getTableName('User_Agents')}" WHERE agent_id = $1`, [agentId]);
-            await pool.query(`DELETE FROM "${getTableName('Sessions')}" WHERE agent_id = $1`, [agentId]); // Cascading logic handles conversations if properly set, but manual delete is safer
-            await pool.query(`DELETE FROM "${getTableName('Conversations')}" WHERE agent_id = $1`, [agentId]);
+
+            // First delete all Conversations linked to this agent's sessions
+            const agentSessions = await pool.query(`SELECT session_id FROM "${getTableName('Sessions')}" WHERE agent_id = $1`, [agentId]);
+            for (const s of agentSessions.rows) {
+                await pool.query(`DELETE FROM "${getTableName('Conversations')}" WHERE session_id = $1`, [s.session_id]);
+            }
+
+            // Now safe to delete Sessions, then the Agent
+            await pool.query(`DELETE FROM "${getTableName('Sessions')}" WHERE agent_id = $1`, [agentId]);
             await pool.query(`DELETE FROM "${getTableName('Agents')}" WHERE agent_id = $1`, [agentId]);
 
             return res.json({ success: true, message: 'Agent permanently deleted and blocked from sync.' });

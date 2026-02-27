@@ -49,7 +49,7 @@ const UsageHistory = () => {
                         <button onClick={() => navigate('/admin/billing')} className="btn-back">
                             <ArrowLeft size={16} /> Back
                         </button>
-                        <h1>Minute Usage Ledger</h1>
+                        <h1>Credits Usage Ledger</h1>
                     </div>
                 </div>
 
@@ -106,12 +106,15 @@ const UsageHistory = () => {
                                         const isCall = txn.type === 'call';
                                         const details = txn.details || {};
 
+                                        // Fix timezone: PostgreSQL returns naive UTC strings; add 'Z' so JS parses as UTC
+                                        const txnDate = new Date((txn.created_at || '').replace(' ', 'T').endsWith('Z') ? txn.created_at : (txn.created_at || '').replace(' ', 'T') + 'Z');
+
                                         // Determine Amount Logics
                                         const amountRaw = isCredit ? txn.credit_amount : txn.debit_amount;
 
                                         // Fix: If it's a subscription and amount is 0, show "Plan"
                                         const isPlan = txn.type === 'subscription' && amountRaw === 0;
-                                        const finalAmountString = isPlan ? 'Plan' : `${amountRaw} min`;
+                                        const finalAmountString = isPlan ? 'Plan' : `${parseFloat(amountRaw || 0).toFixed(2)} Credits`;
                                         const sign = (isCredit && !isPlan) ? '+' : (isCredit ? '' : '-'); // No plus sign for Plan
                                         const color = isCredit ? 'var(--primary)' : '#ef4444';
 
@@ -119,10 +122,10 @@ const UsageHistory = () => {
                                             <tr key={txn.id} className="session-row">
                                                 <td style={{ whiteSpace: 'nowrap' }}>
                                                     <div style={{ fontWeight: '600', fontSize: '0.9rem' }}>
-                                                        {new Date(txn.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                                                        {txnDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
                                                     </div>
                                                     <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                                                        {new Date(txn.created_at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
+                                                        {txnDate.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
                                                     </div>
                                                 </td>
                                                 <td>

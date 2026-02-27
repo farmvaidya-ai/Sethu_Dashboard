@@ -249,7 +249,7 @@ export const getTransactionHistory = async (req, res) => {
         if (filter === 'payments') {
             dataQuery = `
                 SELECT 
-                    id, created_at, type, COALESCE(minutes_added, 0) as credit_amount, 0 as debit_amount, 'credit' as transaction_type,
+                    id, TO_CHAR(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as created_at, type, COALESCE(minutes_added, 0) as credit_amount, 0 as debit_amount, 'credit' as transaction_type,
                     CASE 
                         WHEN type = 'subscription' THEN 'Subscription Purchase'
                         WHEN type = 'minutes' THEN 'Minutes Recharge'
@@ -267,7 +267,7 @@ export const getTransactionHistory = async (req, res) => {
         } else if (filter === 'calls') {
             dataQuery = `
                 SELECT 
-                    ul.id, ul.created_at, 'call' as type, 0 as credit_amount, ROUND((ul.minutes_used * 3.5)::numeric, 2) as debit_amount, 'debit' as transaction_type,
+                    ul.id, TO_CHAR(ul.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as created_at, 'call' as type, 0 as credit_amount, ROUND((ul.minutes_used * 3.5)::numeric, 2) as debit_amount, 'debit' as transaction_type,
                     CASE 
                         WHEN ul.direction = 'inbound' THEN 'Incoming Call'
                         WHEN ul.direction = 'outbound' OR ul.direction IS NULL THEN 'Outgoing Call'
@@ -301,7 +301,7 @@ export const getTransactionHistory = async (req, res) => {
             dataQuery = `
                 SELECT * FROM (
                     SELECT 
-                        id, created_at, type, COALESCE(minutes_added, 0) as credit_amount, 0 as debit_amount, 'credit' as transaction_type,
+                        id, TO_CHAR(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as created_at, type, COALESCE(minutes_added, 0) as credit_amount, 0 as debit_amount, 'credit' as transaction_type,
                         CASE 
                             WHEN type = 'subscription' THEN 'Subscription Purchase'
                             WHEN type = 'minutes' THEN 'Minutes Recharge'
@@ -315,7 +315,7 @@ export const getTransactionHistory = async (req, res) => {
                     UNION ALL
                     
                     SELECT 
-                        ul.id, ul.created_at, 'call' as type, 0 as credit_amount, ROUND((ul.minutes_used * 3.5)::numeric, 2) as debit_amount, 'debit' as transaction_type,
+                        ul.id, TO_CHAR(ul.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as created_at, 'call' as type, 0 as credit_amount, ROUND((ul.minutes_used * 3.5)::numeric, 2) as debit_amount, 'debit' as transaction_type,
                         CASE 
                             WHEN ul.direction = 'inbound' THEN 'Incoming Call'
                             WHEN ul.direction = 'outbound' THEN 'Outgoing Call'
@@ -405,5 +405,85 @@ export const adjustCredits = async (req, res) => {
     } catch (error) {
         console.error('Error adjusting credits:', error);
         res.status(500).json({ success: false, message: 'Failed to adjust credits' });
+    }
+};
+
+// GET /api/payment/heatmap — Returns daily minute usage for the past 365 days
+export const getUsageHeatmap = async (req, res) => {
+    try {
+        const requestingUserId = req.user.userId;
+        const requestingRole = req.user.role;
+        const isMaster = req.user.isMaster && requestingUserId === 'master_root_0';
+
+        // Admins/master can query any userId, regular users see their own
+        let targetUserId = requestingUserId;
+        if ((requestingRole === 'super_admin' || requestingRole === 'admin' || isMaster) && req.query.userId) {
+            targetUserId = req.query.userId;
+        }
+
+        const usageTable = getTableName('UsageLogs');
+        const usersTable = getTableName('Users');
+
+        let query = '';
+        let queryParams = [];
+
+        // If the target is the requesting user themselves, apply role-based scope:
+        if (targetUserId === requestingUserId) {
+            if (isMaster || requestingRole === 'super_admin') {
+                // Super Admin / Master: See ALL usage across the platform
+                query = `
+                    SELECT TO_CHAR(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') as date, SUM(minutes_used) as total_minutes
+                    FROM "${usageTable}"
+                    WHERE created_at >= NOW() - INTERVAL '365 days'
+                    GROUP BY TO_CHAR(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD')
+                    ORDER BY date ASC
+                `;
+            } else if (requestingRole === 'admin') {
+                // Admin: See own usage + usage of any sub-users they created
+                query = `
+                    SELECT TO_CHAR(u_log.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') as date, SUM(u_log.minutes_used) as total_minutes
+                    FROM "${usageTable}" u_log
+                    LEFT JOIN "${usersTable}" u ON u_log.user_id = u.user_id
+                    WHERE (u_log.user_id = $1 OR u.created_by = $1)
+                      AND u_log.created_at >= NOW() - INTERVAL '365 days'
+                    GROUP BY TO_CHAR(u_log.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD')
+                    ORDER BY date ASC
+                `;
+                queryParams = [targetUserId];
+            } else {
+                // Regular User: See only own usage
+                query = `
+                    SELECT TO_CHAR(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') as date, SUM(minutes_used) as total_minutes
+                    FROM "${usageTable}"
+                    WHERE user_id = $1 AND created_at >= NOW() - INTERVAL '365 days'
+                    GROUP BY TO_CHAR(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD')
+                    ORDER BY date ASC
+                `;
+                queryParams = [targetUserId];
+            }
+        } else {
+            // When querying a specific DIFFERENT user's stats from the admin dropdown:
+            query = `
+                SELECT TO_CHAR(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') as date, SUM(minutes_used) as total_minutes
+                FROM "${usageTable}"
+                WHERE user_id = $1 AND created_at >= NOW() - INTERVAL '365 days'
+                GROUP BY TO_CHAR(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD')
+                ORDER BY date ASC
+            `;
+            queryParams = [targetUserId];
+        }
+
+        const result = await pool.query(query, queryParams);
+
+        // Convert to { "YYYY-MM-DD": minutesValue } map
+        const heatmapData = {};
+        for (const row of result.rows) {
+            heatmapData[row.date] = parseFloat(parseFloat(row.total_minutes || 0).toFixed(2));
+        }
+
+        res.json({ success: true, data: heatmapData });
+    } catch (error) {
+        console.error('Error fetching heatmap:', error);
+        res.status(500).json({ success: false, message: 'Failed to fetch heatmap data' });
     }
 };

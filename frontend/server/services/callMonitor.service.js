@@ -50,6 +50,7 @@ export const startMonitor = () => {
     console.log('🏁 Starting Call Monitor Service (Polling Mode)...');
 
     const checkCallStatus = async (call) => {
+        let status = null;
         try {
             const auth = Buffer.from(`${exotelConfig.apiKey}:${exotelConfig.apiToken}`).toString('base64');
             const url = `https://${exotelConfig.subdomain}/v1/Accounts/${exotelConfig.accountSid}/Calls/${call.call_sid}.json`;
@@ -59,7 +60,7 @@ export const startMonitor = () => {
 
             if (!callDetails) return;
 
-            const status = callDetails.Status; // in-progress, completed, failed, busy, no-answer, canceled, ringing
+            status = callDetails.Status; // in-progress, completed, failed, busy, no-answer, canceled, ringing
 
             if (['completed', 'failed', 'busy', 'no-answer', 'canceled'].includes(status)) {
                 console.log(`📞 Call ${call.call_sid} finished with status: ${status}`);
@@ -67,17 +68,35 @@ export const startMonitor = () => {
 
                 let duration = parseInt(callDetails.Duration) || 0;
 
-                // If completed but duration is missing, wait for next poll
+                // Fallback: If Exotel returns null Duration (common for outbound calls in production),
+                // calculate it from StartTime and EndTime if available
+                if (duration === 0 && callDetails.StartTime && callDetails.EndTime) {
+                    const start = new Date(callDetails.StartTime);
+                    const end = new Date(callDetails.EndTime);
+                    const computedSecs = Math.round((end - start) / 1000);
+                    if (computedSecs > 0) {
+                        duration = computedSecs;
+                        console.log(`⏱️ Duration from timestamps (Start→End): ${duration}s (Exotel sent null)`);
+                    }
+                }
+
+                // Check how old the call is in ActiveCalls queue
+                const callAgeMinutes = (new Date() - new Date(call.created_at)) / (1000 * 60);
+
+                // If completed but duration is STILL 0 (no timestamps either), wait or force-remove
                 if (status === 'completed' && duration === 0) {
-                    // Check if it's been too long? (Optional, skipping for now to keep simple)
-                    console.log(`⏳ Call ${call.call_sid} completed but Duration is 0. Waiting for Exotel update...`);
-                    return;
+                    if (callAgeMinutes > 15) {
+                        console.log(`⚠️ Call ${call.call_sid} has no duration after 15 minutes. Forcing removal.`);
+                        // Fall through to finally block to be deleted
+                    } else {
+                        console.log(`⏳ Call ${call.call_sid} completed but Duration is 0. Waiting for Exotel update... (Age: ${Math.floor(callAgeMinutes)}m)`);
+                        return;
+                    }
                 }
 
                 const durationMinutes = parseFloat((duration / 60).toFixed(2));
-                console.log(`Calculated Duration in Min (Precise): ${durationMinutes}`);
-
                 if (durationMinutes > 0) {
+                    console.log(`Calculated Duration in Min (Precise): ${durationMinutes}`);
                     const usersTable = getTableName('Users');
                     const usageTable = getTableName('UsageLogs');
 
@@ -147,16 +166,14 @@ export const startMonitor = () => {
                         }
                     }
                 }
-
-                // Remove from ActiveCalls
-                await pool.query(`DELETE FROM "${getTableName('ActiveCalls')}" WHERE call_sid = $1`, [call.call_sid]);
             }
-
         } catch (error) {
             console.error(`Failed to check status for ${call.call_sid}:`, error.message);
-            // If 404, maybe call is gone? Remove it?
-            if (error.response && error.response.status === 404) {
-                await pool.query(`DELETE FROM "${getTableName('ActiveCalls')}" WHERE call_sid = $1`, [call.call_sid]);
+        } finally {
+            // ALWAYS remove from ActiveCalls if it's no longer in-progress
+            if (['completed', 'failed', 'busy', 'no-answer', 'canceled'].includes(status)) {
+                await pool.query(`DELETE FROM "${getTableName('ActiveCalls')}" WHERE call_sid = $1`, [call.call_sid])
+                    .catch(e => console.error('Failed to clear ActiveCall:', e.message));
             }
         }
     };

@@ -114,7 +114,8 @@ export const paymentAPI = {
     verifyPayment: (data) => api.post('/api/payment/verify', data),
     getBalances: () => api.get('/api/payment/balances'),
     getTransactionHistory: (filter = 'all', page = 1, limit = 50) => api.get('/api/payment/history', { params: { filter, page, limit } }),
-    adjustCredits: (amount, targetUserId) => api.post('/api/payment/adjust-credits', { amount, targetUserId })
+    adjustCredits: (amount, targetUserId) => api.post('/api/payment/adjust-credits', { amount, targetUserId }),
+    getHeatmap: (userId) => api.get('/api/payment/heatmap', { params: userId ? { userId } : {} }),
 };
 
 
