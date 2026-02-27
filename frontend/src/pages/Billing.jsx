@@ -176,20 +176,6 @@ const Billing = () => {
                             label: 'Subscription',
                             value: isSubscriptionActive ? 'Active' : 'Expired',
                             sub: isSubscriptionActive ? `Expires ${expiryDate}` : 'Renew required'
-                        },
-                        {
-                            icon: <TrendingUp size={20} color="white" />,
-                            bg: 'linear-gradient(135deg, #8b5cf6, #7c3aed)',
-                            label: 'Credit Rate',
-                            value: '3.5×',
-                            sub: 'Credits per minute'
-                        },
-                        {
-                            icon: <Activity size={20} color="white" />,
-                            bg: 'linear-gradient(135deg, #f59e0b, #d97706)',
-                            label: 'Total Transactions',
-                            value: transactionsPagination.total || '–',
-                            sub: 'All time'
                         }
                     ].map((card, i) => (
                         <div key={i} style={{ background: card.bg, borderRadius: '16px', padding: '1.25rem', color: 'white', boxShadow: '0 4px 20px rgba(0,0,0,0.12)', display: 'flex', flexDirection: 'column', gap: '12px' }}>
@@ -494,11 +480,14 @@ const Billing = () => {
                                     <select value={adjTarget} onChange={e => setAdjTarget(e.target.value)}
                                         style={{ width: '100%', padding: '10px 12px', borderRadius: '8px', border: '2px solid var(--border)', fontSize: '0.875rem', color: 'var(--text)', background: 'white' }}>
                                         <option value={authUser?.id}>My Account (Self)</option>
-                                        {users.filter(u => u.user_id !== authUser?.id).map(u => (
-                                            <option key={u.user_id} value={u.user_id}>
-                                                {u.name || u.email} — {(u.minutes_balance || 0).toFixed(0)} credits
-                                            </option>
-                                        ))}
+                                        {users.filter(u => u.user_id !== authUser?.id).map(u => {
+                                            const bal = parseFloat(u.minutes_balance || 0);
+                                            return (
+                                                <option key={u.user_id} value={u.user_id}>
+                                                    {u.name || u.email} — {bal.toFixed(0)} minutes
+                                                </option>
+                                            );
+                                        })}
                                     </select>
                                 </div>
                                 <div>
