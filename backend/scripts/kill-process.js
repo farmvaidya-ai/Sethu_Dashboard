@@ -12,9 +12,36 @@ console.log(`🔍 Checking for processes matching "${scriptName}"...`);
 
 if (os.platform() !== 'win32') {
     // Linux/Mac/Unix
-    exec(`pkill -f "${scriptName}"`, (err) => {
-        if (!err) {
-            console.log(`✅ Killed existing processes matching "${scriptName}".`);
+    exec(`ps ax -o pid,command | grep "${scriptName}" | grep -v grep`, (err, stdout) => {
+        if (err || !stdout) {
+            console.log(`ℹ️  No previous process found.`);
+            return;
+        }
+
+        const lines = stdout.trim().split('\n');
+        const pidsToKill = [];
+
+        lines.forEach(line => {
+            // "ps ax -o pid,command" outputs e.g. "12345 node scripts/sync-realtime.js"
+            const parts = line.trim().split(/\s+/, 2); // Split by space, keeping rest of line
+            const pid = parts[0];
+            const command = line.substring(line.indexOf(parts[1]) || 0).toLowerCase();
+
+            if (!/^\d+$/.test(pid)) return; // Skip invalid
+            if (pid === process.pid.toString()) return; // Skip self
+
+            // Skip the kill-process script and npm run sequences
+            if (command.includes('kill-process') || command.includes('npm run')) return;
+
+            pidsToKill.push(pid);
+        });
+
+        if (pidsToKill.length > 0) {
+            console.log(`Found PIDs to kill: ${pidsToKill.join(', ')}.`);
+            exec(`kill -9 ${pidsToKill.join(' ')}`, (killErr) => {
+                if (!killErr) console.log(`✅ Killed existing processes matching "${scriptName}".`);
+                else console.log('⚠️ Failed to kill processes.');
+            });
         } else {
             console.log(`ℹ️  No previous process found.`);
         }
