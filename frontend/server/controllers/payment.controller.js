@@ -26,18 +26,12 @@ const SUBSCRIPTION_AMOUNT = 650000; // 6500 INR in paise
 
 export const createSubscriptionOrder = async (req, res) => {
     try {
-        // Authenticate (token already verified if middleware attached, decoded available in req.user)
-        // Assume auth middleware attached decoded token to req.user or req.decoded
-        // In frontend/server/index.js, routes often check auth manually if not using global middleware,
-        // but campaign routes use router with explicit controller.
-        // We will assume usage of auth middleware or perform token check inside if needed.
-        // Let's assume standard Express request with user attached.
-
-        // Wait, typical pattern in index.js is manual token verification in each route handler (lines 676-686).
-        // If I use a route, I should probably attach a middleware or verify here.
-        // I will assume the route definition uses a middleware to populate req.user.
-
         const userId = req.user.userId;
+
+        // Master admin is not a real DB user — block payment creation
+        if (userId === 'master_root_0' || req.user.isMaster) {
+            return res.status(403).json({ success: false, message: 'Master admin account cannot make payments. Please use a regular admin account to manage subscriptions.' });
+        }
 
         const options = {
             amount: SUBSCRIPTION_AMOUNT,
@@ -76,6 +70,12 @@ export const createSubscriptionOrder = async (req, res) => {
 export const createRechargeOrder = async (req, res) => {
     try {
         const userId = req.user.userId;
+
+        // Master admin is not a real DB user — block payment creation
+        if (userId === 'master_root_0' || req.user.isMaster) {
+            return res.status(403).json({ success: false, message: 'Master admin account cannot make payments. Please use a regular admin account to manage credits.' });
+        }
+
         const requestedAmount = parseInt(req.body.amount, 10);
 
         if (!requestedAmount || requestedAmount < 1000) {
@@ -204,11 +204,18 @@ export const getBalances = async (req, res) => {
 
 export const getTransactionHistory = async (req, res) => {
     try {
-        const userId = req.user.userId;
+        let userId = req.user.userId;
         const paymentsTable = getTableName('Payments');
         const usageTable = getTableName('UsageLogs');
         const sessionsTable = getTableName('Sessions');
         const atcTable = getTableName('Agent_Telephony_Config');
+
+        // Allow super_admin to query any user's data via targetUserId
+        const isSuperAdmin = req.user.role === 'super_admin' || req.user.isMaster;
+        if (isSuperAdmin && req.query.targetUserId) {
+            userId = req.query.targetUserId;
+        }
+
 
         const validFilters = ['payments', 'calls', 'all'];
         const filter = validFilters.includes(req.query.filter) ? req.query.filter : 'all';
@@ -216,14 +223,16 @@ export const getTransactionHistory = async (req, res) => {
         const limit = parseInt(req.query.limit) || 20;
         const offset = (page - 1) * limit;
 
+        // Additional filters for calls
+        const validDirections = ['inbound', 'outbound'];
+        const direction = validDirections.includes(req.query.direction) ? req.query.direction : null;
+        const search = (req.query.search || '').trim().replace(/\D/g, ''); // digits only
+
         let dataQuery = '';
         let countQuery = '';
         let params = [userId];
 
         // Helper for robust details JSON
-        // IMPORTANT: Exotel campaign calls store from_number=customer, to_number=exophone
-        // For OUTBOUND calls: logical From (caller) = exophone = ul.to_number, logical To (recipient) = customer = ul.from_number
-        // For INBOUND calls: logical From (caller) = customer = ul.from_number, logical To (recipient) = exophone = ul.to_number
         const detailsJson = `
             json_build_object(
                 'from', CASE
@@ -240,11 +249,24 @@ export const getTransactionHistory = async (req, res) => {
                 END,
                 'status', COALESCE(NULLIF(ul.call_status, 'Unknown'), CASE WHEN ul.minutes_used > 0 THEN 'Completed' ELSE 'Attempted' END),
                 'direction', COALESCE(ul.direction, 'outbound'),
+                'duration', COALESCE(NULLIF(ul.duration_seconds, 0), ROUND(ul.minutes_used * 60)::int),
                 'sid', ul.call_sid,
                 'recording_url', ul.recording_url,
                 'session_id', s.session_id
             )
         `;
+
+        // Build extra WHERE clauses for direction + phone search
+        let extraWhere = '';
+        const extraParams = [];
+        if (direction) {
+            extraParams.push(direction);
+            extraWhere += ` AND ul.direction = $${params.length + extraParams.length}`;
+        }
+        if (search) {
+            extraParams.push(`%${search}%`);
+            extraWhere += ` AND (ul.from_number LIKE $${params.length + extraParams.length} OR ul.to_number LIKE $${params.length + extraParams.length})`;
+        }
 
         if (filter === 'payments') {
             dataQuery = `
@@ -265,6 +287,8 @@ export const getTransactionHistory = async (req, res) => {
             countQuery = `SELECT COUNT(*) FROM "${paymentsTable}" WHERE user_id = $1`;
 
         } else if (filter === 'calls') {
+            const callParams = [userId, ...extraParams, limit, offset];
+            const countCallParams = [userId, ...extraParams];
             dataQuery = `
                 SELECT 
                     ul.id, TO_CHAR(ul.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as created_at, 'call' as type, 0 as credit_amount, ROUND((ul.minutes_used * 3.5)::numeric, 2) as debit_amount, 'debit' as transaction_type,
@@ -291,11 +315,26 @@ export const getTransactionHistory = async (req, res) => {
                     ORDER BY ABS(EXTRACT(EPOCH FROM (s.started_at - ul.created_at)))
                     LIMIT 1
                 ) s ON true
-                WHERE ul.user_id = $1
-                ORDER BY created_at DESC 
-                LIMIT $2 OFFSET $3
+                WHERE ul.user_id = $1${extraWhere}
+                ORDER BY ul.created_at DESC 
+                LIMIT $${callParams.length - 1} OFFSET $${callParams.length}
             `;
-            countQuery = `SELECT COUNT(*) FROM "${usageTable}" WHERE user_id = $1`;
+            countQuery = `SELECT COUNT(*) FROM "${usageTable}" ul WHERE ul.user_id = $1${extraWhere}`;
+
+            const [dataRes, countRes] = await Promise.all([
+                pool.query(dataQuery, callParams),
+                pool.query(countQuery, countCallParams)
+            ]);
+            return res.json({
+                success: true,
+                data: dataRes.rows,
+                pagination: {
+                    total: parseInt(countRes.rows[0].count || 0),
+                    page,
+                    limit,
+                    totalPages: Math.ceil(parseInt(countRes.rows[0].count || 0) / limit)
+                }
+            });
         } else {
             // ALL
             dataQuery = `

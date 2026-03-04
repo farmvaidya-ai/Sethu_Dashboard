@@ -431,10 +431,23 @@ const initDatabase = async () => {
             { name: 'to_number', type: 'TEXT' },
             { name: 'call_status', type: 'TEXT' },
             { name: 'recording_url', type: 'TEXT' },
+            { name: 'duration_seconds', type: 'INTEGER DEFAULT 0' },  // exact seconds for ledger display
         ];
         for (const col of usageCols) {
             await pool.query(`ALTER TABLE "${usageTable}" ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}`).catch(() => { });
         }
+
+        // Ensure call_sid is unique so ON CONFLICT (call_sid) DO NOTHING prevents duplicate billing on restart
+        // First: remove any duplicate call_sid rows that exist from previous server restarts (keep earliest row)
+        await pool.query(`
+            DELETE FROM "${usageTable}" a
+            USING "${usageTable}" b
+            WHERE a.id > b.id
+              AND a.call_sid = b.call_sid
+              AND a.call_sid IS NOT NULL
+        `).catch(() => { });
+        // Now safe to create unique index
+        await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_usagelogs_call_sid ON "${usageTable}" (call_sid) WHERE call_sid IS NOT NULL`).catch((e) => { console.warn('⚠️ call_sid unique index:', e.message); });
 
         // Notifications
         const notificationsTable = getTableName('Notifications');
