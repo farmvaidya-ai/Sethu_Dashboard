@@ -169,7 +169,7 @@ export default function Dashboard() {
         });
     };
 
-    const fetchRecycleBin = async () => {
+    const fetchRecycleBin = useCallback(async () => {
         try {
             const hiddenRes = await adminAPI.getAllAgents({ show_hidden: 'true', limit: 100 });
             setHiddenAgents(hiddenRes.data.data.filter(a => a.is_hidden));
@@ -180,7 +180,7 @@ export default function Dashboard() {
         } catch (e) {
             console.error("Fetch Recycle Bin Error:", e);
         }
-    };
+    }, []);
 
     useEffect(() => {
         if (recycleBinOpen) {
