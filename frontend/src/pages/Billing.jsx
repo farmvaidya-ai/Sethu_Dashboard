@@ -16,6 +16,7 @@ const Billing = () => {
     const [loading, setLoading] = useState(true);
     const [processing, setProcessing] = useState(false);
     const [rechargeAmount, setRechargeAmount] = useState(1000);
+    const [customAmountStr, setCustomAmountStr] = useState('');
     const [paymentTab, setPaymentTab] = useState('topup');
     useEffect(() => { fetchBalances(); }, []);
 
@@ -201,7 +202,7 @@ const Billing = () => {
                                                                 type="radio"
                                                                 name="topup_amount"
                                                                 checked={isSelected}
-                                                                onChange={() => setRechargeAmount(amt)}
+                                                                onChange={() => { setRechargeAmount(amt); setCustomAmountStr(''); }}
                                                                 style={{ margin: 0, width: 16, height: 16, accentColor: '#008F4B' }}
                                                             />
                                                             <span style={{ fontSize: '0.875rem', color: isSelected ? '#008F4B' : '#334155', fontWeight: isSelected ? '700' : '400' }}>
@@ -221,8 +222,13 @@ const Billing = () => {
                                                         type="number"
                                                         min="1000"
                                                         placeholder="Enter amount"
-                                                        value={CREDIT_AMOUNTS.includes(rechargeAmount) ? '' : (rechargeAmount || '')}
-                                                        onChange={e => setRechargeAmount(Number(e.target.value))}
+                                                        value={customAmountStr}
+                                                        onChange={e => {
+                                                            const val = e.target.value;
+                                                            setCustomAmountStr(val);
+                                                            if (val) setRechargeAmount(Number(val));
+                                                            else setRechargeAmount(0);
+                                                        }}
                                                         style={{ flex: 1, padding: '10px 12px', border: 'none', background: 'transparent', outline: 'none', fontSize: '0.9rem', color: '#1e293b', fontWeight: '600' }}
                                                     />
                                                     <span style={{ padding: '10px 14px', color: '#008F4B', fontWeight: '700', fontSize: '0.8rem' }}>
