@@ -389,6 +389,74 @@ export const handleStatusCallback = async (req, res) => {
  * Handle Passthru Applet data from Exotel
  * Captures missed calls and stream errors
  */
+/**
+ * Background verification to bridge the 30s sync lag.
+ * Schedules a check 60s in the future to confirm if the bot actually spoke.
+ */
+const scheduleMissedCallVerification = (data) => {
+    const { CallSid, finalUserId, agentId, From, To, currentStatus, currentDetailedStatus, errorMessage, disconnectedBy } = data;
+    
+    // Wait 60 seconds for sync-realtime to populate logs
+    setTimeout(async () => {
+        try {
+            console.log(`🔍 [VERIFY] Re-checking call activity for SID: ${CallSid} (From: ${From})`);
+            
+            // 1. Precise Match (Call ID in metadata or session_id)
+            const preciseRes = await pool.query(
+                `SELECT s.conversation_count, s.session_id 
+                 FROM "${getTableName('Sessions')}" s
+                 WHERE (s.metadata->'telephony'->>'call_id' = $1 
+                    OR s.metadata->>'call_id' = $1 
+                    OR s.session_id = $1 
+                    OR s.customer_phone = $2)`,
+                [CallSid, From]
+            );
+            
+            let hasBotTurns = preciseRes.rows.length > 0 && preciseRes.rows.some(r => parseInt(r.conversation_count) > 0);
+
+            // 2. Fuzzy Match (Phone Number + Time Window)
+            // If we didn't find a direct link, look for ANY session for this phone number 
+            // created within 2 minutes of the missed call timestamp.
+            if (!hasBotTurns && From) {
+                const fuzzyRes = await pool.query(
+                    `SELECT conversation_count FROM "${getTableName('Sessions')}" 
+                     WHERE customer_phone = $1 
+                     AND started_at >= NOW() - INTERVAL '5 minutes'
+                     AND conversation_count > 0`,
+                    [From]
+                );
+                if (fuzzyRes.rows.length > 0) {
+                    console.log(`🤝 [VERIFY] Fuzzy match found by phone number for: ${CallSid}`);
+                    hasBotTurns = true;
+                }
+            }
+
+            if (hasBotTurns) {
+                // SUCCESS: Bot actually spoke. Clean up any missed call entry.
+                const del = await pool.query(`DELETE FROM "${getTableName('MissedCalls')}" WHERE call_sid = $1`, [CallSid]);
+                if (del.rowCount > 0) console.log(`✨ [VERIFY] Cleaned false missed call: ${CallSid}`);
+            } else {
+                // STILL MISSED: Even after 60s, no logs found. Log as missed.
+                // We double-check NOT EXISTS one last time
+                await pool.query(
+                    `INSERT INTO "${getTableName('MissedCalls')}" (
+                        user_id, agent_id, call_sid, from_number, to_number, 
+                        status, detailed_status, error_message, disconnected_by,
+                        timestamp, created_at, updated_at
+                    ) 
+                    SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW(), NOW()
+                    WHERE NOT EXISTS (SELECT 1 FROM "${getTableName('MissedCalls')}" WHERE call_sid = $3)`,
+                    [finalUserId || null, agentId || null, CallSid || null, From || null, To || null, 
+                     currentStatus || null, currentDetailedStatus || null, errorMessage, disconnectedBy || null]
+                );
+                console.log(`🚩 [VERIFY] Confirmed MISSED: ${CallSid} (No interaction found for ${From} in last 5m)`);
+            }
+        } catch (err) {
+            console.error(`❌ [VERIFY] Check failed for ${CallSid}:`, err.message);
+        }
+    }, 60000); 
+};
+
 export const handlePassthru = async (req, res) => {
     const params = { ...req.query, ...req.body };
     const { CallSid, From, To, Status, DetailedStatus, Stream } = params;
@@ -422,20 +490,25 @@ export const handlePassthru = async (req, res) => {
         const currentStatus = Status || streamData.Status || params['Stream[Status]'] || params['Status'];
         const currentDetailedStatus = DetailedStatus || streamData.DetailedStatus || params['Stream[DetailedStatus]'] || params['DetailedStatus'];
         const disconnectedBy = streamData.DisconnectedBy || params['Stream[DisconnectedBy]'] || params['DisconnectedBy'];
+        const errorMessage = params.Error || params.ErrorMessage || streamData.Error || streamData.ErrorMessage || null;
+        const duration = parseInt(streamData.Duration || params['Stream[Duration]'] || params.Duration || 0);
 
-        console.log(`📡 [PASSTHRU] Status: ${currentStatus || 'N/A'}, Detailed: ${currentDetailedStatus || 'N/A'}, DisconnectedBy: ${disconnectedBy || 'N/A'}`);
+        console.log(`📡 [PASSTHRU] SID: ${CallSid}, Status: ${currentStatus || 'N/A'}, Duration: ${duration}s, DiscBy: ${disconnectedBy || 'N/A'}`);
 
-        const isMissed = (
-                            ['failed', 'busy', 'no-answer', 'canceled', 'cancelled'].includes(currentStatus?.toLowerCase()) || 
-                            (currentDetailedStatus && (
-                                currentDetailedStatus.toLowerCase().includes('throttle') || 
-                                currentDetailedStatus.toLowerCase().includes('hung-up') ||
-                                currentDetailedStatus.toLowerCase().includes('failed')
-                            )) ||
-                            (disconnectedBy?.toLowerCase() === 'user')
-                         ) && currentStatus?.toLowerCase() !== 'completed';
+        // --- IMMEDIATE "BEST GUESS" LOGIC ---
+        const statusLower = (currentStatus || '').toLowerCase();
+        const detailedLower = (currentDetailedStatus || '').toLowerCase();
+        const discByLower = (disconnectedBy || '').toLowerCase();
 
-        if (isMissed) {
+        const isThrottled = detailedLower.includes('throttle');
+        const isFailureStatus = ['failed', 'cancelled', 'canceled'].includes(statusLower);
+        const isTooShort = duration < 4; // Greeting usually takes at least 4s
+        const isQuickAbandon = discByLower === 'user' && duration < 6;
+
+        const isLikelyMissed = isThrottled || isFailureStatus || isTooShort || isQuickAbandon;
+
+        if (isLikelyMissed) {
+            console.log(`🚩 [PASSTHRU] Logging likely missed call: ${CallSid}`);
             await pool.query(
                 `INSERT INTO "${getTableName('MissedCalls')}" (
                     user_id, agent_id, call_sid, from_number, to_number, 
@@ -444,19 +517,16 @@ export const handlePassthru = async (req, res) => {
                 ) 
                 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW(), NOW()
                 WHERE NOT EXISTS (SELECT 1 FROM "${getTableName('MissedCalls')}" WHERE call_sid = $3)`,
-                [
-                    finalUserId || null,
-                    agentId || null,
-                    CallSid || null,
-                    From || null,
-                    To || null,
-                    currentStatus || null,
-                    currentDetailedStatus || null,
-                    params.ErrorMessage || streamData.ErrorMessage || null,
-                    disconnectedBy || null
-                ]
+                [finalUserId || null, agentId || null, CallSid || null, From || null, To || null, 
+                 currentStatus || null, currentDetailedStatus || null, errorMessage, disconnectedBy || null]
             );
         }
+
+        // --- SCHEDULE BACKGROUND VERIFICATION (The "Gold Standard") ---
+        // This will run in 60s and fix any mistakes once the logs have synced.
+        scheduleMissedCallVerification({
+            CallSid, finalUserId, agentId, From, To, currentStatus, currentDetailedStatus, errorMessage, disconnectedBy
+        });
 
         res.status(200).send('OK');
     } catch (error) {
