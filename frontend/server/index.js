@@ -49,6 +49,14 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Basic Request Logger
+app.use((req, res, next) => {
+    if (req.url.startsWith('/api') || req.url.startsWith('/exotel')) {
+        console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+    }
+    next();
+});
+
 // Mount Campaign Routes
 import { getDynamicGreeting } from './controllers/dynamic_greeting.controller.js';
 app.get('/api/dynamic-greeting', getDynamicGreeting);
@@ -56,6 +64,9 @@ app.use('/api/campaigns', campaignRoutes);
 app.use('/api/payment', paymentRoutes);
 app.use('/api/notifications', notificationsRoutes);
 app.use('/api/exotel', exotelRoutes);
+
+// Helper to handle both /api and non-/api routes if proxy is inconsistent
+const apiRoute = (path) => [`/api${path}`, path];
 
 app.get('/api/ping', (req, res) => res.json({ success: true, timestamp: new Date(), message: 'Front-end monolithic server is alive' }));
 
@@ -3613,17 +3624,20 @@ app.get('/api/telephony/call-details/:callSid', async (req, res) => {
         const auth = Buffer.from(`${apiKey}:${apiToken}`).toString('base64');
         const url = `https://${subdomain}/v1/Accounts/${accountSid}/Calls/${callSid}.json`;
 
-        console.log(`🔍 Fetching call details for: ${callSid}`);
+        console.log(`🔍 Fetching Exotel call details: ${url}`);
         const response = await axios.get(url, {
             headers: { 'Authorization': `Basic ${auth}` }
         });
 
         res.json(response.data);
     } catch (error) {
+        const errorData = error.response?.data;
         console.error(`❌ Failed to fetch Exotel call details for ${callSid}: ${error.message}`);
+        if (errorData) console.error('Error details:', JSON.stringify(errorData));
+        
         res.status(error.response?.status || 500).json({
             error: 'Failed to fetch call details',
-            details: error.response?.data || error.message
+            details: errorData || error.message
         });
     }
 });
