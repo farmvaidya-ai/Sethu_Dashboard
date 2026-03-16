@@ -75,7 +75,7 @@ export const AuthProvider = ({ children }) => {
                         if (isTokenIssue) logout();
                     }
                 }
-            }, 5000); // Check every 5 seconds
+            }, 120000); // Check every 2 minutes (was 5s — too aggressive for a background health check)
         }
 
         if (isDeactivated) {

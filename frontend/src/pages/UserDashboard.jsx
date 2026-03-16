@@ -33,10 +33,10 @@ export default function UserDashboard() {
   useEffect(() => {
     loadDashboard();
 
-    // Add real-time update polling (every 5 seconds)
+    // Add real-time update polling (every 30 seconds)
     const interval = setInterval(() => {
       loadDashboard(true);
-    }, 5000);
+    }, 30000);
 
     return () => clearInterval(interval);
   }, [currentPage, searchTerm, sortBy, sortOrder]);
