@@ -349,7 +349,7 @@ const processCampaignCalls = async (campaignId, contacts, callerId, appId, callI
             // GLOBAL THROTTLE: Check if total active lines (across all agents) < limit
             if (globalActiveLines < concurrentLines && pendingQueue.length > 0) {
                 const item = pendingQueue.shift();
-                
+
                 globalActiveLines++;
                 localActiveLines++;
 

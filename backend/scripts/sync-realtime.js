@@ -29,9 +29,9 @@ const exotelService = require(path.join(__dirname, '../src/services/exotel.servi
 // ============ CONFIGURATION ============
 const SYNC_START_DATE = new Date('2026-01-01T00:00:00Z');
 const POLL_INTERVAL_MS = 2000; // Run every 2 seconds (faster sync for production)
-const MAX_PARALLEL_AGENTS = 3; // Number of "Virtual Workers" for agent syncing
-const MAX_SESSIONS_PER_AGENT_PER_CYCLE = 10; // Fair distribution: no one agent hogs the queue
-const MAX_SESSIONS_PER_CYCLE = 30; // Total cap to keep cycles short (~1-2 min)
+const MAX_PARALLEL_AGENTS = 5; // Increased: Number of "Virtual Workers" for agent syncing
+const MAX_SESSIONS_PER_AGENT_PER_CYCLE = 15; // Fair distribution: no one agent hogs the queue
+const MAX_SESSIONS_PER_CYCLE = 50; // Increased: Total cap to keep cycles short
 
 // Sessions that ENDED after this time will get auto-generated summaries
 // Set to script start time so only new sessions get summaries, not historical ones
@@ -364,8 +364,8 @@ async function syncConversations(client, agents) {
                     c.session_id IS NULL
                     -- 2. Session ended AFTER we last synced its conversation (one-time catch-up)
                     OR (s.ended_at IS NOT NULL AND c.last_synced < s.ended_at)
-                    -- 3. Session still active — re-sync but only every 30 seconds
-                    OR (s.ended_at IS NULL AND (c.last_synced IS NULL OR c.last_synced < NOW() - INTERVAL '30 seconds'))
+                    -- 3. Session still active — re-sync but only every 10 seconds
+                    OR (s.ended_at IS NULL AND (c.last_synced IS NULL OR c.last_synced < NOW() - INTERVAL '10 seconds'))
                     -- 4. Low density (incomplete but has SOME turns) — only retry every 30 minutes
                     OR (c.total_turns > 0
                         AND s.duration_seconds > 60 

@@ -62,10 +62,10 @@ async function notifyAdmin(admin, message) {
 // Helper: Get Admin by Exophone
 async function getAdminFromExophone(exophone) {
     if (!exophone) return null;
-    
+
     // Normalize input exophone: remove common prefixes
     const cleanNumber = exophone.replace(/^(\+91|91|0)/, '');
-    
+
     console.log(`🔍 Mapping Exophone: ${exophone} (Cleaned: ${cleanNumber})`);
 
     const res = await pool.query(`
@@ -295,41 +295,41 @@ export const handleStatusCallback = async (req, res) => {
             }
 
             if (userId) {
-            const durationSeconds = parseInt(Duration) || 0;
-            const durationMinutes = Math.ceil(durationSeconds / 60);
-            
-            // LOG AS MISSED if duration is 0 and it's an inbound call
-            const isActuallyMissed = (durationSeconds === 0 && terminalStatuses.includes(Status)) || 
-                                     ['failed', 'busy', 'no-answer', 'canceled'].includes(Status?.toLowerCase());
+                const durationSeconds = parseInt(Duration) || 0;
+                const durationMinutes = Math.ceil(durationSeconds / 60);
 
-            if (isActuallyMissed) {
-                const admin = await pool.query(`
+                // LOG AS MISSED if duration is 0 and it's an inbound call
+                const isActuallyMissed = (durationSeconds === 0 && terminalStatuses.includes(Status)) ||
+                    ['failed', 'busy', 'no-answer', 'canceled'].includes(Status?.toLowerCase());
+
+                if (isActuallyMissed) {
+                    const admin = await pool.query(`
                     SELECT agent_id FROM "${getTableName('Agent_Telephony_Config')}" 
                     WHERE exophone = $1 OR exophone = $2 OR exophone LIKE '%' || $2
                     LIMIT 1
                 `, [To, To.replace(/^(\+91|91|0)/, '')]);
 
-                await pool.query(
-                    `INSERT INTO "${getTableName('MissedCalls')}" (
+                    await pool.query(
+                        `INSERT INTO "${getTableName('MissedCalls')}" (
                         user_id, agent_id, call_sid, from_number, to_number, 
                         status, detailed_status, error_message,
                         timestamp, created_at, updated_at
                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), NOW())
                     ON CONFLICT (call_sid) DO NOTHING`,
-                    [
-                        userId,
-                        admin.rows[0]?.agent_id || null,
-                        CallSid,
-                        From,
-                        To,
-                        Status,
-                        params.DetailedStatus || 'Zero Duration',
-                        params.ErrorMessage || null
-                    ]
-                );
-            }
+                        [
+                            userId,
+                            admin.rows[0]?.agent_id || null,
+                            CallSid,
+                            From,
+                            To,
+                            Status,
+                            params.DetailedStatus || 'Zero Duration',
+                            params.ErrorMessage || null
+                        ]
+                    );
+                }
 
-            if (durationMinutes > 0) {
+                if (durationMinutes > 0) {
                     const uRes = await pool.query(`SELECT role, created_by FROM "${getTableName('Users')}" WHERE user_id = $1`, [userId]);
                     const u = uRes.rows[0];
                     let billableUserId = userId;
@@ -361,7 +361,7 @@ export const handleStatusCallback = async (req, res) => {
                         ON CONFLICT (call_sid) DO NOTHING`,
                         [
                             crypto.randomUUID(),
-                            userId, 
+                            userId,
                             CallSid,
                             durationMinutes,
                             stdDirection,
@@ -395,12 +395,12 @@ export const handleStatusCallback = async (req, res) => {
  */
 const scheduleMissedCallVerification = (data) => {
     const { CallSid, finalUserId, agentId, From, To, currentStatus, currentDetailedStatus, errorMessage, disconnectedBy } = data;
-    
+
     // Wait 60 seconds for sync-realtime to populate logs
     setTimeout(async () => {
         try {
             console.log(`🔍 [VERIFY] Re-checking call activity for SID: ${CallSid} (From: ${From})`);
-            
+
             // 1. Precise Match (Call ID in metadata or session_id)
             const preciseRes = await pool.query(
                 `SELECT s.conversation_count, s.session_id 
@@ -411,7 +411,7 @@ const scheduleMissedCallVerification = (data) => {
                     OR s.customer_phone = $2)`,
                 [CallSid, From]
             );
-            
+
             let hasBotTurns = preciseRes.rows.length > 0 && preciseRes.rows.some(r => parseInt(r.conversation_count) > 0);
 
             // 2. Fuzzy Match (Phone Number + Time Window)
@@ -446,15 +446,15 @@ const scheduleMissedCallVerification = (data) => {
                     ) 
                     SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW(), NOW()
                     WHERE NOT EXISTS (SELECT 1 FROM "${getTableName('MissedCalls')}" WHERE call_sid = $3)`,
-                    [finalUserId || null, agentId || null, CallSid || null, From || null, To || null, 
-                     currentStatus || null, currentDetailedStatus || null, errorMessage, disconnectedBy || null]
+                    [finalUserId || null, agentId || null, CallSid || null, From || null, To || null,
+                    currentStatus || null, currentDetailedStatus || null, errorMessage, disconnectedBy || null]
                 );
                 console.log(`🚩 [VERIFY] Confirmed MISSED: ${CallSid} (No interaction found for ${From} in last 5m)`);
             }
         } catch (err) {
             console.error(`❌ [VERIFY] Check failed for ${CallSid}:`, err.message);
         }
-    }, 60000); 
+    }, 60000);
 };
 
 export const handlePassthru = async (req, res) => {
@@ -472,7 +472,7 @@ export const handlePassthru = async (req, res) => {
             const cleanNumber = To.replace(/^(\+91|91|0)/, '');
             const fallbackRes = await pool.query(`SELECT agent_id FROM "${getTableName('Agent_Telephony_Config')}" WHERE exophone = $1 OR exophone = $2 OR exophone LIKE '%' || $2 OR $1 LIKE '%' || exophone LIMIT 1`, [To, cleanNumber]);
             agentId = fallbackRes.rows[0]?.agent_id;
-            
+
             // Also attempt to get the user_id if we found the agent
             if (agentId && !finalUserId) {
                 const userRes = await pool.query(`SELECT user_id FROM "${getTableName('User_Agents')}" WHERE agent_id = $1 LIMIT 1`, [agentId]);
@@ -517,8 +517,8 @@ export const handlePassthru = async (req, res) => {
                 ) 
                 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW(), NOW()
                 WHERE NOT EXISTS (SELECT 1 FROM "${getTableName('MissedCalls')}" WHERE call_sid = $3)`,
-                [finalUserId || null, agentId || null, CallSid || null, From || null, To || null, 
-                 currentStatus || null, currentDetailedStatus || null, errorMessage, disconnectedBy || null]
+                [finalUserId || null, agentId || null, CallSid || null, From || null, To || null,
+                currentStatus || null, currentDetailedStatus || null, errorMessage, disconnectedBy || null]
             );
         }
 

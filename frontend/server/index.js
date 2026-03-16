@@ -31,29 +31,32 @@ const DATA_FILE = path.join(__dirname, 'users.json');
 const { Pool } = pg;
 const app = express();
 
-// --- Secure CORS (restrict to FRONTEND_URL in production) ---
-const allowedOrigins = process.env.FRONTEND_URL
-    ? [process.env.FRONTEND_URL, 'http://localhost:5173']
-    : ['http://localhost:5173', 'http://localhost:3000'];
+const allowedOrigins = [
+    process.env.FRONTEND_URL,
+    'http://localhost:5173',
+    'http://localhost:3000',
+    'http://127.0.0.1:3000'
+].filter(Boolean);
+
 app.use(cors({
     origin: (origin, callback) => {
         if (!origin || allowedOrigins.some(o => origin.startsWith(o))) {
             callback(null, true);
         } else {
+            console.error("❌ Blocked by CORS:", origin);
             callback(new Error(`CORS: origin ${origin} not allowed`));
         }
-    },
-    credentials: true
+    }
 }));
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Basic Request Logger
+// In non-production, skip logging high-frequency polling endpoints to keep the terminal clean.
+const SILENT_POLL_ROUTES = ['/api/me', '/api/notifications', '/api/users', '/api/agents', '/api/user/dashboard', '/api/sessions'];
 app.use((req, res, next) => {
-    if (req.url.startsWith('/api') || req.url.startsWith('/exotel')) {
-        console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
-    }
+    // Logging of API requests has been completely disabled per user request
     next();
 });
 
@@ -3634,7 +3637,7 @@ app.get('/api/telephony/call-details/:callSid', async (req, res) => {
         const errorData = error.response?.data;
         console.error(`❌ Failed to fetch Exotel call details for ${callSid}: ${error.message}`);
         if (errorData) console.error('Error details:', JSON.stringify(errorData));
-        
+
         res.status(error.response?.status || 500).json({
             error: 'Failed to fetch call details',
             details: errorData || error.message
