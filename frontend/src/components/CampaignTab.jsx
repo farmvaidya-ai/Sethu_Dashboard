@@ -442,6 +442,7 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
         if (s === 'completed' || s === 'stopped') return 'Completed';
         if (s === 'failed' || s === 'canceled') return 'Failed';
         if (s === 'paused') return 'Paused';
+        if (s === 'scheduled') return 'Scheduled';
         if (s === 'in-progress' || s === 'inprogress' || s === 'running') return 'Running';
 
         // Derive from stats if available
@@ -804,11 +805,11 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
                                         const isCompleted = status === 'Completed';
                                         const isPaused = status === 'Paused';
                                         const isRunning = status === 'Running';
+                                        const isScheduled = status === 'Scheduled';
 
-                                        const cardBorderColor = isFailed ? '#ef4444' : isCompleted ? '#22c55e' : isPaused ? '#94a3b8' : isRunning ? '#3b82f6' : '#e5e7eb';
-                                        const cardBg = isFailed ? '#fef2f2' : isCompleted ? '#f0fdf4' : isRunning ? '#eff6ff' : 'white';
-                                        const badgeBg = isFailed ? '#fee2e2' : isCompleted ? '#dcfce7' : isPaused ? '#f1f5f9' : isRunning ? '#dbeafe' : '#fef9c3';
-                                        const badgeColor = isFailed ? '#991b1b' : isCompleted ? '#166534' : isPaused ? '#475569' : isRunning ? '#1d4ed8' : '#854d0e';
+                                        const cardBorderColor = isFailed ? '#ef4444' : isCompleted ? '#22c55e' : isPaused ? '#94a3b8' : isRunning ? '#3b82f6' : isScheduled ? '#f59e0b' : '#e5e7eb';
+                                        const badgeBg = isFailed ? '#fee2e2' : isCompleted ? '#dcfce7' : isPaused ? '#f1f5f9' : isRunning ? '#dbeafe' : isScheduled ? '#fffbeb' : '#fef9c3';
+                                        const badgeColor = isFailed ? '#991b1b' : isCompleted ? '#166534' : isPaused ? '#475569' : isRunning ? '#1d4ed8' : isScheduled ? '#92400e' : '#854d0e';
 
                                         // Mock stats if not present (since list API often omits them)
                                         // In a real scenario, we'd need to fetch these or have the backend aggregate them.
@@ -884,9 +885,17 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
                                                         {campaignDisplayName(camp)}
                                                     </h4>
 
-                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', color: '#6b7280', marginBottom: '1.25rem' }}>
-                                                        <Clock size={14} />
-                                                        <span>{formatCampaignDate(camp.date_created)}</span>
+                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '1.25rem' }}>
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', color: '#6b7280' }}>
+                                                            <Clock size={14} />
+                                                            <span>Created: {formatCampaignDate(camp.date_created)}</span>
+                                                        </div>
+                                                        {isScheduled && camp.schedule?.send_at && (
+                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', color: '#92400e', fontWeight: '700' }}>
+                                                                <Play size={14} />
+                                                                <span>Scheduled for: {formatCampaignDate(camp.schedule.send_at)}</span>
+                                                            </div>
+                                                        )}
                                                     </div>
 
                                                     {/* Stats Row */}
@@ -1038,16 +1047,30 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
                             </div>
 
                             {/* Created At */}
-                            <div style={{ background: '#fffbeb', padding: '1rem', borderRadius: '10px', border: '1px solid #fde68a', display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                                <div style={{ width: '40px', height: '40px', borderRadius: '8px', background: '#fef3c7', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#d97706' }}>
+                            <div style={{ background: '#f8fafc', padding: '1rem', borderRadius: '10px', border: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                                <div style={{ width: '40px', height: '40px', borderRadius: '8px', background: '#f1f5f9', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b' }}>
                                     <Clock size={20} />
                                 </div>
                                 <div>
-                                    <div style={{ fontSize: '0.8rem', color: '#92400e', fontWeight: '500' }}>Created On</div>
-                                    <div style={{ fontSize: '0.9rem', fontWeight: '600', color: '#78350f' }}>{new Date(selectedCampaign.date_created).toLocaleDateString()}</div>
-                                    <div style={{ fontSize: '0.75rem', color: '#92400e' }}>{new Date(selectedCampaign.date_created).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+                                    <div style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: '500' }}>Created On</div>
+                                    <div style={{ fontSize: '0.9rem', fontWeight: '600', color: '#334155' }}>{new Date(selectedCampaign.date_created).toLocaleDateString()}</div>
+                                    <div style={{ fontSize: '0.75rem', color: '#64748b' }}>{new Date(selectedCampaign.date_created).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
                                 </div>
                             </div>
+
+                            {/* Scheduled Time (If applicable) */}
+                            {selectedCampaign.schedule?.send_at && (
+                                <div style={{ background: '#fffbeb', padding: '1rem', borderRadius: '10px', border: '1px solid #fde68a', display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                                    <div style={{ width: '40px', height: '40px', borderRadius: '8px', background: '#fef3c7', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#d97706' }}>
+                                        <Play size={20} />
+                                    </div>
+                                    <div>
+                                        <div style={{ fontSize: '0.8rem', color: '#92400e', fontWeight: '500' }}>Scheduled Start</div>
+                                        <div style={{ fontSize: '0.9rem', fontWeight: '700', color: '#78350f' }}>{new Date(selectedCampaign.schedule.send_at).toLocaleDateString()}</div>
+                                        <div style={{ fontSize: '0.75rem', color: '#92400e' }}>{new Date(selectedCampaign.schedule.send_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+                                    </div>
+                                </div>
+                            )}
 
                         </div>
                     </div>
