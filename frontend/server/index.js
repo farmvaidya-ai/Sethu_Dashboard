@@ -2537,7 +2537,7 @@ app.post('/api/users/:userId/reset-password', async (req, res) => {
             [token, expiry, userId]
         );
 
-        const resetLink = `${process.env.FRONTEND_URL || 'http://localhost:5173'} /reset-password/${token} `;
+        const resetLink = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/reset-password/${token}`;
 
         if (process.env.SMTP_HOST) {
             try {

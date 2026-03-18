@@ -478,7 +478,8 @@ export const initiateCampaign = async (req, res) => {
 
         if (req.file.originalname.match(/\.(xlsx|xls)$/i)) {
             try {
-                const workbook = XLSX.readFile(filePath);
+                const fileBuffer = fs.readFileSync(filePath);
+                const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
                 const sheetName = workbook.SheetNames[0];
                 const worksheet = workbook.Sheets[sheetName];
                 fileContent = XLSX.utils.sheet_to_csv(worksheet);
