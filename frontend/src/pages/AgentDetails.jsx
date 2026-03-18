@@ -673,12 +673,13 @@ export default function AgentDetails() {
 
         // Polling every 30 seconds
         const interval = setInterval(() => {
+            // Background refresh - don't show loading spinner
             fetchSessions();
             fetchAgentDetails();
         }, 30000);
 
         return () => clearInterval(interval);
-    }, [fetchSessions, fetchAgentDetails]);
+    }, [fetchSessions, fetchAgentDetails, sessions.length]);
 
     // Debounce search
     useEffect(() => {

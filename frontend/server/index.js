@@ -23,6 +23,7 @@ import exotelRoutes from './routes/exotel.routes.js';
 import notificationsRoutes from './routes/notifications.routes.js';
 import { startMonitor } from './services/callMonitor.service.js';
 import { startAutoRenewalCron } from './services/subscriptionRenewal.service.js';
+import { resumeCampaignsOnStartup } from './controllers/campaign.controller.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -574,8 +575,9 @@ const initDatabase = async () => {
               AND a.call_sid = b.call_sid
               AND a.call_sid IS NOT NULL
         `).catch(() => { });
-        // Now safe to create unique index
-        await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_usagelogs_call_sid ON "${usageTable}" (call_sid) WHERE call_sid IS NOT NULL`).catch((e) => { console.warn('⚠️ call_sid unique index:', e.message); });
+        
+        // Ensure UNIQUE constraint exists for ON CONFLICT (call_sid) to work
+        await pool.query(`ALTER TABLE "${usageTable}" ADD CONSTRAINT usage_logs_call_sid_unique UNIQUE (call_sid)`).catch(() => { });
 
         // Notifications
         const notificationsTable = getTableName('Notifications');
@@ -4154,5 +4156,6 @@ app.get('/api/settings/throttle', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
     await initDatabase();
+    await resumeCampaignsOnStartup();
     console.log(`✅ Server running on port ${PORT} (${APP_ENV} mode)`);
 });

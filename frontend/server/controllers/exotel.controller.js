@@ -296,7 +296,7 @@ export const handleStatusCallback = async (req, res) => {
 
             if (userId) {
                 const durationSeconds = parseInt(Duration) || 0;
-                const durationMinutes = Math.ceil(durationSeconds / 60);
+                const durationMinutes = parseFloat((durationSeconds / 60).toFixed(2));
 
                 // LOG AS MISSED if duration is 0 and it's an inbound call
                 const isActuallyMissed = (durationSeconds === 0 && terminalStatuses.includes(Status)) ||
@@ -340,25 +340,18 @@ export const handleStatusCallback = async (req, res) => {
 
                     const isExempt = u.role === 'super_admin' || userId === 'master_root_0';
 
-                    if (!isExempt) {
-                        const creditsToDeduct = parseFloat((durationMinutes * 3.5).toFixed(2));
-                        await pool.query(
-                            `UPDATE "${getTableName('Users')}" SET minutes_balance = ROUND((minutes_balance - $1)::numeric, 2), updated_at = NOW() WHERE user_id = $2`,
-                            [creditsToDeduct, billableUserId]
-                        );
-                    }
-
-                    // Better Direction Detection: If To is an exophone, it's inbound
+                    // Better Direction Detection
                     const atcCheck = await pool.query(`SELECT 1 FROM "${getTableName('Agent_Telephony_Config')}" WHERE exophone = $1 OR exophone = $2 OR exophone LIKE '%' || $2 LIMIT 1`, [To, To.replace(/^(\+91|91|0)/, '')]);
                     let stdDirection = Direction || (atcCheck.rows.length > 0 ? 'inbound' : (call ? 'inbound' : 'outbound'));
 
-                    await pool.query(
+                    // Step 1: Insert to UsageLogs first to check for idempotency
+                    const logRes = await pool.query(
                         `INSERT INTO "${getTableName('UsageLogs')}" (
                             id, user_id, call_sid, minutes_used, timestamp, 
                             direction, from_number, to_number, call_status, recording_url, 
                             created_at, updated_at
                         ) VALUES ($1, $2, $3, $4, NOW(), $5, $6, $7, $8, $9, NOW(), NOW())
-                        ON CONFLICT (call_sid) DO NOTHING`,
+                        ON CONFLICT (call_sid) DO NOTHING RETURNING id`,
                         [
                             crypto.randomUUID(),
                             userId,
@@ -371,6 +364,20 @@ export const handleStatusCallback = async (req, res) => {
                             RecordingUrl || null
                         ]
                     );
+
+                    // Step 2: Only deduct credits IF it was NOT a duplicate
+                    if (logRes.rows.length > 0) {
+                        if (!isExempt) {
+                            const creditsToDeduct = parseFloat((durationMinutes * 3.5).toFixed(2));
+                            await pool.query(
+                                `UPDATE "${getTableName('Users')}" SET minutes_balance = ROUND((minutes_balance - $1)::numeric, 2), updated_at = NOW() WHERE user_id = $2`,
+                                [creditsToDeduct, billableUserId]
+                            );
+                            console.log(`💰 [Callback] Deducted ${creditsToDeduct} credits from ${billableUserId} for call ${CallSid}`);
+                        }
+                    } else {
+                        console.log(`ℹ️ [Callback] Call ${CallSid} already billed. Skipping.`);
+                    }
                 }
 
                 if (call) {

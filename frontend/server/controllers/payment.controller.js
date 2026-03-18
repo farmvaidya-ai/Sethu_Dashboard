@@ -442,9 +442,11 @@ export const getTransactionHistory = async (req, res) => {
                     END as description,
                     ${detailsJson} as details
                 FROM "${usageTable}" ul
-                LEFT JOIN "${atcTable}" atc ON (
-                    atc.exophone = ul.to_number OR atc.exophone = ul.from_number
-                )
+                LEFT JOIN LATERAL (
+                    SELECT agent_id, exophone FROM "${atcTable}"
+                    WHERE exophone = ul.to_number OR exophone = ul.from_number
+                    LIMIT 1
+                ) atc ON true
                 LEFT JOIN LATERAL (
                     SELECT s.session_id, s.agent_id, s.metadata
                     FROM "${sessionsTable}" s
@@ -505,9 +507,11 @@ export const getTransactionHistory = async (req, res) => {
                         END as description,
                         ${detailsJson} as details
                     FROM "${usageTable}" ul
-                    LEFT JOIN "${atcTable}" atc ON (
-                        atc.exophone = ul.to_number OR atc.exophone = ul.from_number
-                    )
+                    LEFT JOIN LATERAL (
+                        SELECT agent_id, exophone FROM "${atcTable}"
+                        WHERE exophone = ul.to_number OR exophone = ul.from_number
+                        LIMIT 1
+                    ) atc ON true
                     LEFT JOIN LATERAL (
                         SELECT s.session_id, s.agent_id, s.metadata
                         FROM "${sessionsTable}" s
