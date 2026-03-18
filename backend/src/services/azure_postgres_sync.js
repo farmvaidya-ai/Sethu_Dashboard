@@ -18,21 +18,48 @@ const AZURE_CONFIG = {
 
 // ─── HIGH-WATER MARK ─────────────────────────────────────────────────────────
 // Tracks MAX(updated_at) of Azure rows we have processed.
-// WHY updated_at (not created_at):
-//   A session is created when the call starts (ended_at = NULL).
-//   Azure sets ended_at ~1 minute later AND bumps updated_at.
-//   If we tracked created_at, we'd advance the HWM past the session before
-//   ended_at is set, and NEVER re-fetch it. Using updated_at we catch both
-//   brand-new sessions AND sessions whose ended_at just got filled in.
 let _lastAzureSyncTime = null;
 
-function _getHighWaterMark() {
+async function _getHighWaterMark() {
     if (!_lastAzureSyncTime) {
-        // First run this process lifetime: start from project beginning
-        _lastAzureSyncTime = new Date('2026-01-01T00:00:00Z');
-        logger.info(`[Azure] First run — high-water mark initialized to ${_lastAzureSyncTime.toISOString()}`);
+        try {
+            const table = getTableName('System_Settings');
+            const setting = await sequelize.query(
+                `SELECT setting_value FROM "${table}" WHERE setting_key = 'azure_sync_hwm'`,
+                { type: sequelize.QueryTypes.SELECT }
+            );
+            if (setting && setting.length > 0 && setting[0].setting_value) {
+                _lastAzureSyncTime = new Date(setting[0].setting_value);
+                logger.info(`[Azure] Persistent high-water mark loaded: ${_lastAzureSyncTime.toISOString()}`);
+            }
+        } catch (e) {
+            logger.warn(`[Azure] Could not load HWM from DB: ${e.message}`);
+        }
+
+        if (!_lastAzureSyncTime) {
+            _lastAzureSyncTime = new Date('2026-01-01T00:00:00Z');
+            logger.info(`[Azure] First run — high-water mark initialized to ${_lastAzureSyncTime.toISOString()}`);
+        }
     }
     return _lastAzureSyncTime;
+}
+
+async function _saveHighWaterMark(timestamp) {
+    if (!timestamp) return;
+    try {
+        const table = getTableName('System_Settings');
+        await sequelize.query(`
+            INSERT INTO "${table}" (setting_key, setting_value, description, updated_at)
+            VALUES ('azure_sync_hwm', :val, 'High-water mark for Azure log sync', NOW())
+            ON CONFLICT (setting_key) 
+            DO UPDATE SET setting_value = EXCLUDED.setting_value, updated_at = NOW()
+        `, { 
+            replacements: { val: timestamp.toISOString() },
+            type: sequelize.QueryTypes.INSERT
+        });
+    } catch (e) {
+        logger.error(`[Azure] Failed to save HWM: ${e.message}`);
+    }
 }
 
 // ─── CONCURRENT UPSERT HELPER ─────────────────────────────────────────────────
@@ -94,12 +121,12 @@ async function syncAzurePostgresLogs(Agent, Session, Conversation) {
         // We use updated_at (not created_at) so that sessions synced mid-call
         // (with ended_at=NULL) get re-fetched automatically once Azure sets
         // their ended_at and bumps updated_at.
-        const hwm = _getHighWaterMark();
+        const hwm = await _getHighWaterMark();
         const res = await client.query(
             `SELECT * FROM sessions
              WHERE updated_at > $1
              ORDER BY updated_at ASC
-             LIMIT 500`,          // hard cap per cycle to keep cycles short
+             LIMIT 1500`,          // increased limit for faster catch-up
             [hwm]
         );
         const rows = res.rows;
@@ -239,8 +266,8 @@ async function syncAzurePostgresLogs(Agent, Session, Conversation) {
             syncedCount++;
         });
 
-        // Run up to 6 sessions concurrently
-        await runConcurrent(tasks, 6);
+        // Run up to 15 sessions concurrently for faster catch-up
+        await runConcurrent(tasks, 15);
 
         // ── 7. ADVANCE HIGH-WATER MARK using MAX(updated_at) ─────────────────
         // Must use updated_at here to match our query — not created_at or
@@ -251,7 +278,8 @@ async function syncAzurePostgresLogs(Agent, Session, Conversation) {
                 new Date(_lastAzureSyncTime)
             );
             _lastAzureSyncTime = latestUpdatedAt;
-            logger.info(`[Azure] High-water mark advanced to ${_lastAzureSyncTime.toISOString()}`);
+            await _saveHighWaterMark(_lastAzureSyncTime);
+            logger.info(`[Azure] High-water mark advanced to ${_lastAzureSyncTime.toISOString()} (Saved)`);
         }
 
         const elapsed = ((Date.now() - syncStart) / 1000).toFixed(1);
