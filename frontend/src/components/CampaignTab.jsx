@@ -309,6 +309,9 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
             data.append('throttle', cpm);
         }
 
+        // Clock Sync Mitigation: Send browser's current ISO time
+        data.append('browser_time', new Date().toISOString());
+
         try {
             setCreating(true);
             await campaignAPI.createCampaign(data);

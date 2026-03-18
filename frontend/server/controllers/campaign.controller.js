@@ -502,7 +502,19 @@ export const initiateCampaign = async (req, res) => {
     }
 
     try {
+        const { campaignName, callerId, device_id, agentId, retries, schedule, flowUrl, message, throttle, flowType, browser_time } = req.body;
         console.log(`🚀 Initiating campaign: ${campaignName} (Agent: ${agentId || 'None'})`);
+
+        // Clock Sync logic: Calculate browser-server clock drift
+        let driftOffset = 0;
+        if (browser_time) {
+            const browserNow = new Date(browser_time).getTime();
+            const serverNow = Date.now();
+            driftOffset = serverNow - browserNow;
+            if (Math.abs(driftOffset) > 10000) { // Log if more than 10s difference
+                console.log(`🕰️ Clock drift detected: Server is ${Math.abs(driftOffset / 1000).toFixed(1)}s ${driftOffset > 0 ? 'AHEAD of' : 'BEHIND'} browser. Adjusting schedule.`);
+            }
+        }
 
         // --- 1. Normalize CSV (E.164 format) ---
         let fileContent = fs.readFileSync(filePath, 'utf8');
@@ -686,7 +698,15 @@ export const initiateCampaign = async (req, res) => {
         let parsedSchedule = undefined;
         try {
             if (retries) parsedRetries = typeof retries === 'string' ? JSON.parse(retries) : retries;
-            if (schedule) parsedSchedule = typeof schedule === 'string' ? JSON.parse(schedule) : schedule;
+            if (schedule) {
+                parsedSchedule = typeof schedule === 'string' ? JSON.parse(schedule) : schedule;
+                
+                // Clock Sync: Adjust send_at by the detected clock drift
+                if (parsedSchedule.send_at && driftOffset !== 0) {
+                    const originalTime = new Date(parsedSchedule.send_at).getTime();
+                    parsedSchedule.send_at = new Date(originalTime + driftOffset).toISOString();
+                }
+            }
         } catch (e) { }
 
         // --- 7. Create local campaign record ---
