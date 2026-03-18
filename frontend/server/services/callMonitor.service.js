@@ -81,12 +81,6 @@ export const startMonitor = () => {
                     }
                 }
 
-                // Minimum Pulse: For completed calls, charge at least 60 seconds (1 min)
-                if (status === 'completed' && duration < 60) {
-                    duration = 60;
-                    console.log(`ℹ️ [Monitor] Applying minimum 60s charge for call ${call.call_sid}`);
-                }
-
                 const durationMinutes = parseFloat((duration / 60).toFixed(2));
                 if (durationMinutes > 0 && isBillable) {
                     console.log(`💰 Call ${call.call_sid} confirmed billable: ${durationMinutes} min (${duration}s)`);
