@@ -81,18 +81,10 @@ export const startMonitor = () => {
                     }
                 }
 
-                // Check how old the call is in ActiveCalls queue
-                const callAgeMinutes = (new Date() - new Date(call.created_at)) / (1000 * 60);
-
-                // If completed but duration is STILL 0 (no timestamps either), wait or force-remove
-                if (status === 'completed' && duration === 0) {
-                    if (callAgeMinutes > 15) {
-                        console.log(`⚠️ Call ${call.call_sid} has no duration after 15 minutes. Forcing removal.`);
-                        // Fall through to finally block to be deleted
-                    } else {
-                        console.log(`⏳ Call ${call.call_sid} completed but Duration is 0. Waiting for Exotel update... (Age: ${Math.floor(callAgeMinutes)}m)`);
-                        return;
-                    }
+                // Minimum Pulse: For completed calls, charge at least 60 seconds (1 min)
+                if (status === 'completed' && duration < 60) {
+                    duration = 60;
+                    console.log(`ℹ️ [Monitor] Applying minimum 60s charge for call ${call.call_sid}`);
                 }
 
                 const durationMinutes = parseFloat((duration / 60).toFixed(2));
