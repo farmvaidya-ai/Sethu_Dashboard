@@ -378,6 +378,7 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
         if (s === 'in-progress' || s === 'ringing' || s === 'initiated' || s === 'queued') return '#f59e0b';
         if (s === 'pending') return '#64748b';
         if (s === 'paused') return '#64748b';
+        if (s === 'scheduled') return '#92400e';
         return '#94a3b8';
     };
 
@@ -389,6 +390,7 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
         if (s === 'in-progress' || s === 'ringing' || s === 'initiated' || s === 'queued') return '#fffbeb';
         if (s === 'pending') return '#f1f5f9';
         if (s === 'paused') return '#f1f5f9';
+        if (s === 'scheduled') return '#fffbeb';
         return '#f8fafc';
     };
 
