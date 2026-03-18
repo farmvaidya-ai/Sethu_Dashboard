@@ -167,11 +167,6 @@ const getCallStatus = async (callSid) => {
         }
     }
 
-    // Minimum Pulse: 60s for completed/answered
-    if ((call.Status === 'completed' || call.Status === 'answered') && duration < 60) {
-        duration = 60;
-    }
-
     return {
         sid: call.Sid,
         status: (call.Status || '').toLowerCase(),

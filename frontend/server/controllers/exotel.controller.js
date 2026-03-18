@@ -305,11 +305,6 @@ export const handleStatusCallback = async (req, res) => {
                     if (diff > 0) durationSeconds = diff;
                 }
 
-                // Minimum Pulse: 60s for completed
-                if (Status === 'completed' && durationSeconds < 60) {
-                    durationSeconds = 60;
-                }
-
                 const durationMinutes = parseFloat((durationSeconds / 60).toFixed(2));
 
                 // LOG AS MISSED if duration is 0 and it's an inbound call
