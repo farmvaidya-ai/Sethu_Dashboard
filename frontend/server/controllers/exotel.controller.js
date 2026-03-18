@@ -359,25 +359,53 @@ export const handleStatusCallback = async (req, res) => {
                     let stdDirection = Direction || (atcCheck.rows.length > 0 ? 'inbound' : (call ? 'inbound' : 'outbound'));
 
                     // Step 1: Insert to UsageLogs first to check for idempotency
-                    const logRes = await pool.query(
-                        `INSERT INTO "${getTableName('UsageLogs')}" (
-                            id, user_id, call_sid, minutes_used, timestamp, 
-                            direction, from_number, to_number, call_status, recording_url, 
-                            created_at, updated_at
-                        ) VALUES ($1, $2, $3, $4, NOW(), $5, $6, $7, $8, $9, NOW(), NOW())
-                        ON CONFLICT (call_sid) DO NOTHING RETURNING id`,
-                        [
-                            crypto.randomUUID(),
-                            userId,
-                            CallSid,
-                            durationMinutes,
-                            stdDirection,
-                            From,
-                            To,
-                            Status,
-                            RecordingUrl || null
-                        ]
-                    );
+                    const usageTable = getTableName('UsageLogs');
+                    const logValues = [
+                        crypto.randomUUID(),
+                        userId,
+                        CallSid,
+                        durationMinutes,
+                        stdDirection,
+                        From,
+                        To,
+                        Status,
+                        RecordingUrl || null
+                    ];
+
+                    let logRes;
+                    try {
+                        logRes = await pool.query(
+                            `INSERT INTO "${usageTable}" (
+                                id, user_id, call_sid, minutes_used, timestamp, 
+                                direction, from_number, to_number, call_status, recording_url, 
+                                created_at, updated_at
+                            ) VALUES ($1, $2, $3, $4, NOW(), $5, $6, $7, $8, $9, NOW(), NOW())
+                            ON CONFLICT (call_sid) DO NOTHING RETURNING id`,
+                            logValues
+                        );
+                    } catch (insertErr) {
+                        if (insertErr.code === '42P10') {
+                            console.warn(`⚠️ [Callback] Missing unique constraint on ${usageTable}.call_sid; using fallback idempotency check.`);
+                            const existing = await pool.query(
+                                `SELECT id FROM "${usageTable}" WHERE call_sid = $1 LIMIT 1`,
+                                [CallSid]
+                            );
+                            if (existing.rows.length > 0) {
+                                logRes = { rows: [] };
+                            } else {
+                                logRes = await pool.query(
+                                    `INSERT INTO "${usageTable}" (
+                                        id, user_id, call_sid, minutes_used, timestamp, 
+                                        direction, from_number, to_number, call_status, recording_url, 
+                                        created_at, updated_at
+                                    ) VALUES ($1, $2, $3, $4, NOW(), $5, $6, $7, $8, $9, NOW(), NOW()) RETURNING id`,
+                                    logValues
+                                );
+                            }
+                        } else {
+                            throw insertErr;
+                        }
+                    }
 
                     // Step 2: Only deduct credits IF it was NOT a duplicate
                     if (logRes.rows.length > 0) {

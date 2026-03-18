@@ -566,18 +566,29 @@ const initDatabase = async () => {
             await pool.query(`ALTER TABLE "${usageTable}" ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}`).catch(() => { });
         }
 
-        // Ensure call_sid is unique so ON CONFLICT (call_sid) DO NOTHING prevents duplicate billing on restart
-        // First: remove any duplicate call_sid rows that exist from previous server restarts (keep earliest row)
+        // Ensure call_sid is unique so ON CONFLICT (call_sid) DO NOTHING prevents duplicate billing on restart.
+        // Remove duplicate non-null call_sid rows (keep earliest by created_at/id) before creating the unique index.
         await pool.query(`
-            DELETE FROM "${usageTable}" a
-            USING "${usageTable}" b
-            WHERE a.id > b.id
-              AND a.call_sid = b.call_sid
-              AND a.call_sid IS NOT NULL
+            DELETE FROM "${usageTable}"
+            WHERE id IN (
+                SELECT id FROM (
+                    SELECT id,
+                           ROW_NUMBER() OVER (PARTITION BY call_sid ORDER BY created_at ASC NULLS LAST, id ASC) AS rn
+                    FROM "${usageTable}"
+                    WHERE call_sid IS NOT NULL
+                ) dedupe
+                WHERE dedupe.rn > 1
+            )
         `).catch(() => { });
-        
-        // Ensure UNIQUE constraint exists for ON CONFLICT (call_sid) to work
-        await pool.query(`ALTER TABLE "${usageTable}" ADD CONSTRAINT usage_logs_call_sid_unique UNIQUE (call_sid)`).catch(() => { });
+
+        // Use a table-specific index name to avoid collisions between prod/test tables in the same schema.
+        const usageCallSidUniqueIndex = `${usageTable.toLowerCase()}_call_sid_uidx`;
+        try {
+            await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS "${usageCallSidUniqueIndex}" ON "${usageTable}" (call_sid)`);
+            console.log(`✅ Unique index verified on ${usageTable}.call_sid`);
+        } catch (idxErr) {
+            console.warn(`⚠️ Failed to verify unique index on ${usageTable}.call_sid: ${idxErr.message}`);
+        }
 
         // Notifications
         const notificationsTable = getTableName('Notifications');
@@ -635,6 +646,24 @@ const initDatabase = async () => {
         } catch (err) {
             console.error(`Failed to migrate MissedCalls table:`, err.message);
         }
+
+        // ON CONFLICT(call_sid) is used while inserting missed calls, so keep call_sid unique.
+        await pool.query(`
+            DELETE FROM "${missedCallsTable}"
+            WHERE id IN (
+                SELECT id FROM (
+                    SELECT id,
+                           ROW_NUMBER() OVER (PARTITION BY call_sid ORDER BY created_at ASC NULLS LAST, id ASC) AS rn
+                    FROM "${missedCallsTable}"
+                    WHERE call_sid IS NOT NULL
+                ) dedupe
+                WHERE dedupe.rn > 1
+            )
+        `).catch(() => { });
+        const missedCallSidUniqueIndex = `${missedCallsTable.toLowerCase()}_call_sid_uidx`;
+        await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS "${missedCallSidUniqueIndex}" ON "${missedCallsTable}" (call_sid)`).catch(err => {
+            console.warn(`⚠️ Could not verify unique index on ${missedCallsTable}.call_sid: ${err.message}`);
+        });
 
         const billingCols = [
             { name: 'phone_number', type: 'TEXT' },
