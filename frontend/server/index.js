@@ -1460,7 +1460,7 @@ app.get('/api/active-sessions', async (req, res) => {
 // Missed Calls logic moved to top of routes section
 
 // Get Sessions for Agent
-app.get('/api/sessions', async (req, res) => {
+app.get(['/api/sessions', '/api/api/sessions'], async (req, res) => {
     const { agent_id, page = 1, limit = 10, sortBy = 'started_at', sortOrder = 'desc', search = '', review_status = '', startDate = '', endDate = '' } = req.query;
     if (!agent_id) return res.status(400).json({ error: "Agent ID required" });
 
