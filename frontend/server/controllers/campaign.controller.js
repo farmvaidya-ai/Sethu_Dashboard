@@ -1030,3 +1030,54 @@ export const resumeCampaign = async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 };
+/**
+ * Startup hook to resume any unfinished campaigns or re-queue scheduled ones
+ */
+export const resumeCampaignsOnStartup = async () => {
+    try {
+        await ensureLocalCampaignsTable();
+        const result = await pool.query(
+            `SELECT * FROM "${LOCAL_CAMPAIGNS_TABLE}" WHERE status IN ('scheduled', 'in-progress', 'paused-daily', 'retrying')`
+        );
+
+        if (result.rows.length === 0) return;
+        console.log(`🔄 Startup: Resuming ${result.rows.length} campaigns...`);
+
+        for (const row of result.rows) {
+            const campaignId = row.id;
+            
+            // Re-calculate remaining contacts (not fully success/failure yet)
+            const callResultsArr = Array.isArray(row.call_results) ? row.call_results : [];
+            const contacts = Array.isArray(row.contacts) ? row.contacts : [];
+            
+            // If it's scheduled, we give it the full contact list
+            // If it was in-progress, we only give it people not yet reached
+            let remaining = contacts;
+            if (row.status !== 'scheduled') {
+                remaining = contacts.filter(c => {
+                    const cr = callResultsArr.find(r => r.number === c.number);
+                    return !cr || cr.status === 'retrying' || cr.status === 'pending';
+                });
+            }
+
+            if (remaining.length > 0) {
+                console.log(`   ▶️ Restarting: ${row.name} (${remaining.length} calls)`);
+                processCampaignCalls(
+                    campaignId, 
+                    remaining, 
+                    row.caller_id, 
+                    row.app_id, 
+                    row.call_interval_sec, 
+                    row.concurrent_lines, 
+                    row.retries, 
+                    row.schedule
+                ).catch(err => console.error(`❌ Startup loop error on ${campaignId}:`, err.message));
+            } else if (row.status !== 'scheduled') {
+                // Was in-progress but actually everything finished before restart
+                await pool.query(`UPDATE "${LOCAL_CAMPAIGNS_TABLE}" SET status = 'completed' WHERE id = $1`, [campaignId]);
+            }
+        }
+    } catch (err) {
+        console.error('❌ Failed to resume campaigns on startup:', err.message);
+    }
+};

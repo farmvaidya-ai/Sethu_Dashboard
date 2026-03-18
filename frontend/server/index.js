@@ -23,6 +23,7 @@ import exotelRoutes from './routes/exotel.routes.js';
 import notificationsRoutes from './routes/notifications.routes.js';
 import { startMonitor } from './services/callMonitor.service.js';
 import { startAutoRenewalCron } from './services/subscriptionRenewal.service.js';
+import { resumeCampaignsOnStartup } from './controllers/campaign.controller.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -4154,5 +4155,6 @@ app.get('/api/settings/throttle', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
     await initDatabase();
+    await resumeCampaignsOnStartup();
     console.log(`✅ Server running on port ${PORT} (${APP_ENV} mode)`);
 });
