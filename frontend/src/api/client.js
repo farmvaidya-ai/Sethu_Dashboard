@@ -10,6 +10,9 @@ const apiClient = axios.create({
 
 // Add token to requests
 apiClient.interceptors.request.use((config) => {
+    if (typeof config.url === 'string' && config.url.startsWith('/api/')) {
+        config.url = config.url.replace(/^\/api\//, '');
+    }
     const token = localStorage.getItem('token');
     if (token) {
         config.headers.Authorization = `Bearer ${token}`;

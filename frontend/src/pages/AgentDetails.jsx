@@ -1672,7 +1672,7 @@ export default function AgentDetails() {
 
                                                 // API search by phone
                                                 toast.loading('Searching for session by phone...', { id: 'search-phone' });
-                                                api.get('/api/sessions', { params: { agent_id: agentId, search: last10, limit: 1 } })
+                                                api.get('sessions', { params: { agent_id: agentId, search: last10, limit: 1 } })
                                                     .then(res => {
                                                         toast.dismiss('search-phone');
                                                         if (res.data && res.data.data && res.data.data.length > 0) {
@@ -1709,7 +1709,7 @@ export default function AgentDetails() {
                                             // Specific API search for CallSid if not found locally
                                             toast.loading(`Searching session for Call ID...`, { id: 'search-sid' });
 
-                                            api.get('/api/sessions', { params: { agent_id: agentId, search: callSid, limit: 1 } })
+                                            api.get('sessions', { params: { agent_id: agentId, search: callSid, limit: 1 } })
                                                 .then(res => {
                                                     toast.dismiss('search-sid');
                                                     if (res.data && res.data.data && res.data.data.length > 0) {
