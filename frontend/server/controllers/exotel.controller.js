@@ -295,7 +295,21 @@ export const handleStatusCallback = async (req, res) => {
             }
 
             if (userId) {
-                const durationSeconds = parseInt(Duration) || 0;
+                let durationSeconds = parseInt(Duration) || 0;
+                
+                // Fallback: Use Timestamps if Duration is 0 but it's completed
+                if (durationSeconds === 0 && Status === 'completed' && params.StartTime && params.EndTime) {
+                    const start = new Date(params.StartTime);
+                    const end = new Date(params.EndTime);
+                    const diff = Math.round((end - start) / 1000);
+                    if (diff > 0) durationSeconds = diff;
+                }
+
+                // Minimum Pulse: 60s for completed
+                if (Status === 'completed' && durationSeconds < 60) {
+                    durationSeconds = 60;
+                }
+
                 const durationMinutes = parseFloat((durationSeconds / 60).toFixed(2));
 
                 // LOG AS MISSED if duration is 0 and it's an inbound call

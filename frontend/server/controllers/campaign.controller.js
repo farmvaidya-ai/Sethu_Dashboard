@@ -151,9 +151,26 @@ const getCallStatus = async (callSid) => {
     const call = response.data?.Call || {};
     // Exotel V1 returns Duration (total ring+talk) and ConversationDuration (talk only)
     // Use ConversationDuration if available, fall back to Duration
-    const conversationDuration = parseInt(call.ConversationDuration) || 0;
-    const totalDuration = parseInt(call.Duration) || 0;
-    const duration = conversationDuration > 0 ? conversationDuration : totalDuration;
+    let conversationDuration = parseInt(call.ConversationDuration) || 0;
+    let totalDuration = parseInt(call.Duration) || 0;
+    let duration = conversationDuration > 0 ? conversationDuration : totalDuration;
+
+    // Fallback: If both durations are 0 but we have start/end timestamps, calculate it.
+    if (duration === 0 && (call.Status === 'completed' || call.Status === 'answered') && call.StartTime && call.EndTime) {
+        const start = new Date(call.StartTime);
+        const end = new Date(call.EndTime);
+        const diff = Math.round((end - start) / 1000);
+        if (diff > 0) {
+            duration = diff;
+            // Also update totalDuration for logging/consistency
+            totalDuration = diff;
+        }
+    }
+
+    // Minimum Pulse: 60s for completed/answered
+    if ((call.Status === 'completed' || call.Status === 'answered') && duration < 60) {
+        duration = 60;
+    }
 
     return {
         sid: call.Sid,
