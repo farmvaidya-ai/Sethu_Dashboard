@@ -62,6 +62,13 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
             // If super_admin and showAll is checked, fetch EVERYTHING (don't pass agentId)
             // Otherwise, fetch filtered by agentId
             const res = await campaignAPI.getAllCampaigns((isSuperAdmin && showAll) ? null : agentId);
+            
+            // If backend reports Exotel failure, notify user but don't necessarily wipe everything
+            if (res.data?.exotelError) {
+                console.warn('Exotel Sync partial failure');
+                toast.error('Exotel Sync failed. Showing local campaigns only.', { id: 'exotel-sync-error' });
+            }
+
             // Handle various response structures
             let data = [];
             if (res.data && Array.isArray(res.data)) {
@@ -71,6 +78,10 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
             } else if (res.data?.response && Array.isArray(res.data.response)) {
                 data = res.data.response;
             }
+
+            // If we are in "inspect" mode and the response is empty but we have existing campaigns,
+            // we suspect a transient API failure that wasn't caught. For now, we allow the update
+            // but the exotelError flag above will handle the warning.
 
             // Normalize data (Handle wrappers like { code: 200, data: { ... } })
             const normalizedData = data.map(camp => {
@@ -103,6 +114,8 @@ export default function CampaignTab({ agentId, agentName, onNavigateToSession, t
             }
         } catch (error) {
             console.error('Failed to fetch campaigns:', error);
+            // On hard error, don't wipe the list if we already have data
+            toast.error('Could not refresh campaigns. Please check your connection.');
         } finally {
             setLoading(false);
         }

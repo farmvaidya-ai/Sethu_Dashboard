@@ -755,6 +755,7 @@ export const getCampaigns = async (req, res) => {
 
         // Fetch Exotel campaigns for legacy display
         let exotelCampaigns = [];
+        let exotelErrorMsg = null;
         try {
             const response = await exotelService.getAllCampaigns();
             exotelCampaigns = response?.response || response?.campaigns || [];
@@ -765,14 +766,12 @@ export const getCampaigns = async (req, res) => {
                 const excludedRes = await pool.query(`SELECT item_id FROM "${table}" WHERE item_type = 'campaign'`);
                 const excludedIds = new Set(excludedRes.rows.map(r => r.item_id));
 
-                // SUFFIX Match for agent isolation in Exotel (naming convention)
                 const suffix = agentId ? `_ag${agentId.slice(-4)}`.toLowerCase() : '';
 
                 exotelCampaigns = exotelCampaigns.filter(c => {
                     const id = c.sid || c.id || (c.data && c.data.id);
                     if (excludedIds.has(id)) return false;
 
-                    // If agentId specified, strictly filter by name suffix
                     if (agentId) {
                         const name = (c.friendly_name || c.name || (c.data && c.data.name) || '').toLowerCase();
                         return name.includes(`_ag${agentId}`.toLowerCase()) || (suffix && name.includes(suffix));
@@ -783,16 +782,26 @@ export const getCampaigns = async (req, res) => {
                 console.error('Error filtering excluded campaigns:', dbErr);
             }
         } catch (exoErr) {
-            console.warn('⚠️ Could not fetch Exotel campaigns:', exoErr.message);
+            console.warn('⚠️ Could fetch Exotel campaigns:', exoErr.message);
+            exotelErrorMsg = exoErr.message;
         }
 
         // Merge: local campaigns first, then Exotel ones
         const allCampaigns = [...localCampaigns, ...exotelCampaigns];
 
-        res.json({ success: true, data: allCampaigns });
+        res.json({ 
+            success: true, 
+            data: allCampaigns,
+            exotelError: !!exotelErrorMsg,
+            exotelMessage: exotelErrorMsg
+        });
     } catch (error) {
         console.error('Error fetching campaigns:', error);
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ 
+            success: false, 
+            error: error.message,
+            data: [] 
+        });
     }
 };
 
