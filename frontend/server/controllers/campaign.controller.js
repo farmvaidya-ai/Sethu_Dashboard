@@ -81,12 +81,15 @@ const ensureLocalCampaignsTable = async () => {
                 app_id TEXT,
                 contacts JSONB DEFAULT '[]',
                 call_results JSONB DEFAULT '[]',
+                user_id TEXT,
                 date_created TIMESTAMPTZ DEFAULT NOW(),
                 date_updated TIMESTAMPTZ DEFAULT NOW(),
                 retries JSONB,
                 schedule JSONB
             )
         `);
+        // Ensure user_id column exists for existing tables
+        await pool.query(`ALTER TABLE "${LOCAL_CAMPAIGNS_TABLE}" ADD COLUMN IF NOT EXISTS user_id TEXT`).catch(() => { });
     } catch (err) {
         console.error('Error creating local campaigns table:', err.message);
     }
@@ -116,6 +119,10 @@ const makeDirectCall = async (number, name, callerId, appId) => {
     params.append('CallerId', callerId);
     params.append('Url', flowUrl);
     if (name) params.append('CustomField', name);
+
+    // Add status callback for credit deduction (standard callback endpoint)
+    const callbackUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/api/exotel/callback`;
+    params.append('StatusCallback', callbackUrl);
 
     const response = await axios.post(url, params, {
         headers: {
@@ -201,14 +208,20 @@ const waitForCallEnd = async (callSid, signal, maxWaitMs = 300000) => {
 };
 
 // --- Background call processor (global slot-based concurrency) ---
-const processCampaignCalls = async (campaignId, contacts, callerId, appId, callIntervalSec, concurrentLines, retries, schedule) => {
+const processCampaignCalls = async (campaignId, contacts, callerId, appId, callIntervalSec, concurrentLines, retries, schedule, userId, initialResults = []) => {
     const signal = { aborted: false, abort: false };
     activeCampaigns.set(campaignId, signal);
 
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
     let completedCalls = 0;
     let failedCalls = 0;
-    const callResults = [];
+    const callResults = Array.isArray(initialResults) ? [...initialResults] : [];
+    
+    // Seed completed/failed counts from initial results
+    callResults.forEach(r => {
+        if (r.status === 'completed') completedCalls++;
+        else if (r.status === 'failed') failedCalls++;
+    });
     const retriesCount = retries?.number_of_retries || 0;
     const retryIntervalMin = retries?.interval_mins || 10;
 
@@ -292,15 +305,21 @@ const processCampaignCalls = async (campaignId, contacts, callerId, appId, callI
         else callResults.push(newRecord);
     };
 
-    // Make a single call attempt (no retry loop — caller handles scheduling retries)
-    // Returns: { success: bool, shouldRetry: bool, error?: string }
-    const processOneAttempt = async (contact, contactIndex, attempt) => {
+    const processOneAttempt = async (contact, contactIndex, attempt, userId) => {
         try {
             const result = await makeDirectCall(contact.number, contact.first_name, callerId, appId);
             const callSid = result?.Call?.Sid;
             console.log(`📲 [Campaign ${campaignId}] Call ${contactIndex}/${contacts.length} to ${contact.number} initiated (SID: ${callSid}, attempt ${attempt + 1})`);
 
             if (callSid) {
+                // Register in ActiveCalls for Billing Monitor
+                if (userId) {
+                    await pool.query(
+                        `INSERT INTO "${getTableName('ActiveCalls')}" (call_sid, user_id, start_time, created_at, updated_at) VALUES ($1, $2, NOW(), NOW(), NOW()) ON CONFLICT (call_sid) DO NOTHING`,
+                        [callSid, userId]
+                    ).catch(err => console.error(`⚠️ Failed to register campaign call in ActiveCalls: ${err.message}`));
+                }
+
                 const finalStatus = await waitForCallEnd(callSid, signal);
                 console.log(`📞 [Campaign ${campaignId}] Call ${contactIndex}/${contacts.length} to ${contact.number} ended: ${finalStatus.status} (${finalStatus.duration}s)`);
 
@@ -346,7 +365,14 @@ const processCampaignCalls = async (campaignId, contacts, callerId, appId, callI
     let localActiveLines = 0;
 
     try {
-        const pendingQueue = contacts.map((contact, i) => ({ contact, contactIndex: i + 1, attempt: 0 }));
+        const pendingQueue = contacts.map((contact, i) => {
+            const cr = Array.isArray(callResults) ? callResults.find(r => r.number === contact.number) : null;
+            return {
+                contact,
+                contactIndex: i + 1,
+                attempt: cr?.attempts_done || 0
+            };
+        });
         const retryHold = [];
         const pendingPromises = [];
 
@@ -385,7 +411,7 @@ const processCampaignCalls = async (campaignId, contacts, callerId, appId, callI
                 globalActiveLines++;
                 localActiveLines++;
 
-                const callPromise = processOneAttempt(item.contact, item.contactIndex, item.attempt)
+                const callPromise = processOneAttempt(item.contact, item.contactIndex, item.attempt, userId)
                     .then(({ success, shouldRetry, error }) => {
                         if (!success && shouldRetry) {
                             const retryAfter = Date.now() + retryIntervalMin * 60 * 1000;
@@ -460,10 +486,11 @@ export const initiateCampaign = async (req, res) => {
         return res.status(401).json({ error: 'No token provided' });
     }
 
+    let userId;
     try {
         const token = authHeader.split(' ')[1];
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        const userId = decoded.userId;
+        userId = decoded.userId;
 
         const tableName = process.env.APP_ENV === 'test' ? 'test_users' : 'Users';
         const userRes = await pool.query(`SELECT minutes_balance, role, created_by, subscription_expiry, is_active FROM "${tableName}" WHERE user_id = $1`, [userId]);
@@ -477,6 +504,10 @@ export const initiateCampaign = async (req, res) => {
             if (parentRes.rows[0]) {
                 billableUser = parentRes.rows[0];
             }
+        }
+        
+        // Block regular 'user' from starting campaigns (from previous logic)
+        if (user.role === 'user') {
             if (filePath && fs.existsSync(filePath)) fs.unlink(filePath, () => { });
             return res.status(403).json({ error: 'Users are permitted to inspect campaigns, but cannot create campaigns. Contact your administrator.' });
         }
@@ -716,12 +747,13 @@ export const initiateCampaign = async (req, res) => {
         const initialStatus = (parsedSchedule?.send_at && new Date(parsedSchedule.send_at) > new Date()) ? 'scheduled' : 'in-progress';
 
         await pool.query(
-            `INSERT INTO "${LOCAL_CAMPAIGNS_TABLE}" (id, name, agent_id, status, total_contacts, call_interval_sec, concurrent_lines, caller_id, app_id, contacts, retries, schedule)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+            `INSERT INTO "${LOCAL_CAMPAIGNS_TABLE}" (id, name, agent_id, status, total_contacts, call_interval_sec, concurrent_lines, caller_id, app_id, contacts, retries, schedule, user_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
             [campaignId, displayName, agentId, initialStatus, campaignContacts.length, callIntervalSec, concurrentLines,
                 effectiveCallerId, agentAppId, JSON.stringify(campaignContacts),
                 parsedRetries ? JSON.stringify(parsedRetries) : null,
-                parsedSchedule ? JSON.stringify(parsedSchedule) : null]
+                parsedSchedule ? JSON.stringify(parsedSchedule) : null,
+                userId]
         );
 
         console.log(`📋 Created local campaign: ${displayName} (${campaignId}) - ${campaignContacts.length} contacts`);
@@ -743,7 +775,7 @@ export const initiateCampaign = async (req, res) => {
         });
 
         // Fire and forget — process calls in background
-        processCampaignCalls(campaignId, campaignContacts, effectiveCallerId, agentAppId, callIntervalSec, concurrentLines, parsedRetries, parsedSchedule)
+        processCampaignCalls(campaignId, campaignContacts, effectiveCallerId, agentAppId, callIntervalSec, concurrentLines, parsedRetries, parsedSchedule, userId)
             .catch(err => console.error(`❌ Background campaign error: ${err.message}`));
 
     } catch (error) {
@@ -1045,6 +1077,7 @@ export const resumeCampaignsOnStartup = async () => {
 
         for (const row of result.rows) {
             const campaignId = row.id;
+            const userId = row.user_id;
             
             // Re-calculate remaining contacts (not fully success/failure yet)
             const callResultsArr = Array.isArray(row.call_results) ? row.call_results : [];
@@ -1061,7 +1094,7 @@ export const resumeCampaignsOnStartup = async () => {
             }
 
             if (remaining.length > 0) {
-                console.log(`   ▶️ Restarting: ${row.name} (${remaining.length} calls)`);
+                console.log(`   ▶️ Restarting: ${row.name} (${remaining.length} calls remaining)`);
                 processCampaignCalls(
                     campaignId, 
                     remaining, 
@@ -1070,10 +1103,12 @@ export const resumeCampaignsOnStartup = async () => {
                     row.call_interval_sec, 
                     row.concurrent_lines, 
                     row.retries, 
-                    row.schedule
+                    row.schedule,
+                    userId,
+                    callResultsArr
                 ).catch(err => console.error(`❌ Startup loop error on ${campaignId}:`, err.message));
-            } else if (row.status !== 'scheduled') {
-                // Was in-progress but actually everything finished before restart
+            } else {
+                console.log(`   ✅ Skipping finished campaign: ${row.name}`);
                 await pool.query(`UPDATE "${LOCAL_CAMPAIGNS_TABLE}" SET status = 'completed' WHERE id = $1`, [campaignId]);
             }
         }

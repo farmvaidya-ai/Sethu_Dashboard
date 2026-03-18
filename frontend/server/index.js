@@ -575,8 +575,9 @@ const initDatabase = async () => {
               AND a.call_sid = b.call_sid
               AND a.call_sid IS NOT NULL
         `).catch(() => { });
-        // Now safe to create unique index
-        await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_usagelogs_call_sid ON "${usageTable}" (call_sid) WHERE call_sid IS NOT NULL`).catch((e) => { console.warn('⚠️ call_sid unique index:', e.message); });
+        
+        // Ensure UNIQUE constraint exists for ON CONFLICT (call_sid) to work
+        await pool.query(`ALTER TABLE "${usageTable}" ADD CONSTRAINT usage_logs_call_sid_unique UNIQUE (call_sid)`).catch(() => { });
 
         // Notifications
         const notificationsTable = getTableName('Notifications');

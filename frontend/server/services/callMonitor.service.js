@@ -67,10 +67,11 @@ export const startMonitor = () => {
                 console.log(`🔍 Raw Call Details:`, JSON.stringify(callDetails));
 
                 let duration = parseInt(callDetails.Duration) || 0;
+                const isBillable = ['completed', 'answered', 'busy-agent', 'completed-direct'].includes(status);
 
                 // Fallback: If Exotel returns null Duration (common for outbound calls in production),
-                // calculate it from StartTime and EndTime if available
-                if (duration === 0 && callDetails.StartTime && callDetails.EndTime) {
+                // calculate it from StartTime and EndTime if available, but ONLY for billable statuses.
+                if (duration === 0 && isBillable && callDetails.StartTime && callDetails.EndTime) {
                     const start = new Date(callDetails.StartTime);
                     const end = new Date(callDetails.EndTime);
                     const computedSecs = Math.round((end - start) / 1000);
@@ -95,8 +96,8 @@ export const startMonitor = () => {
                 }
 
                 const durationMinutes = parseFloat((duration / 60).toFixed(2));
-                if (durationMinutes > 0) {
-                    console.log(`Calculated Duration in Min (Precise): ${durationMinutes}`);
+                if (durationMinutes > 0 && isBillable) {
+                    console.log(`💰 Call ${call.call_sid} confirmed billable: ${durationMinutes} min (${duration}s)`);
                     const usersTable = getTableName('Users');
                     const usageTable = getTableName('UsageLogs');
 
@@ -107,70 +108,62 @@ export const startMonitor = () => {
                         // Exemption Logic
                         const isExempt = u.role === 'super_admin' || call.user_id === 'master_root_0';
 
-                        if (!isExempt) {
-                            let billableUserId = call.user_id;
-                            if (u.role === 'user' && u.created_by) {
-                                billableUserId = u.created_by;
-                            }
+                        // LOG USAGE FIRST to ensure idempotency
+                        const direction = callDetails.Direction === 'inbound' ? 'inbound' : 'outbound';
+                        const logRes = await pool.query(
+                            `INSERT INTO "${usageTable}" (id, user_id, call_sid, minutes_used, duration_seconds, direction, from_number, to_number, call_status, recording_url, timestamp, created_at, updated_at)
+                             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW(), NOW())
+                             ON CONFLICT (call_sid) DO NOTHING RETURNING id`,
+                            [
+                                crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(7),
+                                call.user_id,
+                                call.call_sid,
+                                durationMinutes,
+                                duration,
+                                direction,
+                                callDetails.From || null,
+                                callDetails.To || null,
+                                callDetails.Status || 'completed',
+                                callDetails.RecordingUrl || null
+                            ]
+                        );
 
-                            const creditsToDeduct = parseFloat((durationMinutes * 3.5).toFixed(2));
-                            console.log(`💰 Deducting ${creditsToDeduct} credits (${durationMinutes} min) from user ${billableUserId}`);
-
-                            const updateRes = await pool.query(
-                                `UPDATE "${usersTable}" SET minutes_balance = ROUND((minutes_balance - $1)::numeric, 2), updated_at = NOW() WHERE user_id = $2 RETURNING minutes_balance, low_balance_threshold, email, last_low_credit_alert, role`,
-                                [creditsToDeduct, billableUserId]
-                            );
-
-                            if (updateRes.rows.length > 0) {
-                                const adminUser = updateRes.rows[0];
-                                const threshold = adminUser.low_balance_threshold || 50;
-
-                                if (adminUser.minutes_balance <= threshold && adminUser.role !== 'user') {
-                                    console.log(`🔔 Low Balance Call Alert triggered for ${adminUser.email} (Balance: ${adminUser.minutes_balance})`);
-
-                                    const message = adminUser.minutes_balance <= 0
-                                        ? "You are receiving calls but your balance is zero. Please recharge immediately to avoid service interruption."
-                                        : "You are receiving calls but you are getting low with the balance please recharge.";
-
-                                    // Create Notification unconditionally on every call
-                                    await pool.query(
-                                        `INSERT INTO "${getTableName('Notifications')}" (user_id, type, title, message) VALUES ($1, $2, $3, $4)`,
-                                        [
-                                            billableUserId,
-                                            'low_balance_call',
-                                            'Call While Balance Low',
-                                            message
-                                        ]
-                                    ).catch(err => console.error('Failed to create notification:', err));
+                        if (logRes.rows.length > 0) {
+                            // NEW LOG CREATED: Proceed with credit deduction
+                            if (!isExempt) {
+                                let billableUserId = call.user_id;
+                                if (u.role === 'user' && u.created_by) {
+                                    billableUserId = u.created_by;
                                 }
-                            }
 
-                            // Log Usage with full call details — check for duplicate call_sid before inserting
-                            const direction = callDetails.Direction === 'inbound' ? 'inbound' : 'outbound';
-                            const existingLog = await pool.query(`SELECT id FROM "${usageTable}" WHERE call_sid = $1 LIMIT 1`, [call.call_sid]);
-                            if (existingLog.rows.length > 0) {
-                                console.log(`⚠️ Skipping duplicate UsageLog for call_sid ${call.call_sid}`);
-                            } else {
-                                await pool.query(
-                                    `INSERT INTO "${usageTable}" (id, user_id, call_sid, minutes_used, duration_seconds, direction, from_number, to_number, call_status, recording_url, timestamp, created_at, updated_at)
-                                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW(), NOW())`,
-                                    [
-                                        crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(7),
-                                        call.user_id,
-                                        call.call_sid,
-                                        durationMinutes,
-                                        duration,
-                                        direction,
-                                        callDetails.From || null,
-                                        callDetails.To || null,
-                                        callDetails.Status || 'completed',
-                                        callDetails.RecordingUrl || null
-                                    ]
+                                const creditsToDeduct = parseFloat((durationMinutes * 3.5).toFixed(2));
+                                console.log(`💰 [Monitor] Deducting ${creditsToDeduct} credits (${durationMinutes} min) for call ${call.call_sid}`);
+
+                                const updateRes = await pool.query(
+                                    `UPDATE "${usersTable}" SET minutes_balance = ROUND((minutes_balance - $1)::numeric, 2), updated_at = NOW() WHERE user_id = $2 RETURNING minutes_balance, low_balance_threshold, email, last_low_credit_alert, role`,
+                                    [creditsToDeduct, billableUserId]
                                 );
-                            }
 
+                                if (updateRes.rows.length > 0) {
+                                    const adminUser = updateRes.rows[0];
+                                    const threshold = adminUser.low_balance_threshold || 50;
+
+                                    if (adminUser.minutes_balance <= threshold && adminUser.role !== 'user') {
+                                        const message = adminUser.minutes_balance <= 0
+                                            ? "You are receiving calls but your balance is zero. Please recharge immediately to avoid service interruption."
+                                            : "You are receiving calls but you are getting low with the balance please recharge.";
+
+                                        await pool.query(
+                                            `INSERT INTO "${getTableName('Notifications')}" (user_id, type, title, message) VALUES ($1, $2, $3, $4)`,
+                                            [billableUserId, 'low_balance_call', 'Call While Balance Low', message]
+                                        ).catch(err => console.error('Failed to create notification:', err));
+                                    }
+                                }
+                            } else {
+                                console.log(`StartMonitor: Skipping deduction for Exempt User ${call.user_id}`);
+                            }
                         } else {
-                            console.log(`StartMonitor: Skipping deduction for Exempt User ${call.user_id}`);
+                            console.log(`ℹ️ [Monitor] Call ${call.call_sid} already billed. Skipping.`);
                         }
                     }
                 }
