@@ -229,6 +229,33 @@ const processCampaignCalls = async (campaignId, contacts, callerId, appId, callI
         const now = new Date();
         return (now.getHours() * 60 + now.getMinutes()) >= endMins;
     };
+
+    const isBeforeScheduledStart = () => {
+        if (!schedule?.send_at) return false;
+        const sendAt = new Date(schedule.send_at).getTime();
+        return Date.now() < sendAt;
+    };
+
+    const waitUntilScheduledStart = async () => {
+        const sendAt = new Date(schedule.send_at).getTime();
+        const waitMs = sendAt - Date.now();
+        if (waitMs <= 0) return;
+
+        console.log(`⏰ [Campaign ${campaignId}] Scheduled start at ${schedule.send_at}. Waiting...`);
+        await pool.query(`UPDATE "${LOCAL_CAMPAIGNS_TABLE}" SET status = 'scheduled', date_updated = NOW() WHERE id = $1`, [campaignId]).catch(() => { });
+
+        // Sleep in 1-minute chunks so abort is responsive
+        const chunk = 60_000;
+        let waited = 0;
+        while (waited < waitMs) {
+            if (signal.aborted || signal.abort) return;
+            await sleep(Math.min(chunk, waitMs - waited));
+            waited += chunk;
+        }
+        await pool.query(`UPDATE "${LOCAL_CAMPAIGNS_TABLE}" SET status = 'in-progress', date_updated = NOW() WHERE id = $1`, [campaignId]).catch(() => { });
+        console.log(`🚀 [Campaign ${campaignId}] Reached schedule time. Starting calls.`);
+    };
+
     const waitUntilNextDailyStart = async () => {
         const startMins = getDailyStartMinutes();
         const now = new Date();
@@ -329,6 +356,11 @@ const processCampaignCalls = async (campaignId, contacts, callerId, appId, callI
             if (signal.aborted || signal.abort) {
                 console.log(`⏹️ [Campaign ${campaignId}] Aborted by user`);
                 break;
+            }
+
+            // Scheduled start check (first run)
+            if (isBeforeScheduledStart()) {
+                await waitUntilScheduledStart();
             }
 
             // Daily window check
@@ -661,10 +693,12 @@ export const initiateCampaign = async (req, res) => {
         const campaignId = `local_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
         const displayName = agentId ? `${campaignName}_AG${agentId.slice(-4)}` : campaignName;
 
+        const initialStatus = (parsedSchedule?.send_at && new Date(parsedSchedule.send_at) > new Date()) ? 'scheduled' : 'in-progress';
+
         await pool.query(
             `INSERT INTO "${LOCAL_CAMPAIGNS_TABLE}" (id, name, agent_id, status, total_contacts, call_interval_sec, concurrent_lines, caller_id, app_id, contacts, retries, schedule)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-            [campaignId, displayName, agentId, 'in-progress', campaignContacts.length, callIntervalSec, concurrentLines,
+            [campaignId, displayName, agentId, initialStatus, campaignContacts.length, callIntervalSec, concurrentLines,
                 effectiveCallerId, agentAppId, JSON.stringify(campaignContacts),
                 parsedRetries ? JSON.stringify(parsedRetries) : null,
                 parsedSchedule ? JSON.stringify(parsedSchedule) : null]
