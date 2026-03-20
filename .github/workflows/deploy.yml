@@ -52,7 +52,10 @@ jobs:
             echo "✅ Code updated to $(git rev-parse --short HEAD)"
 
             export NVM_DIR="$HOME/.nvm"
-            source "$NVM_DIR/nvm.sh"
+            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+            [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+            
+            nvm install 20
             nvm use 20
 
             # ── 3. Install backend dependencies ──
