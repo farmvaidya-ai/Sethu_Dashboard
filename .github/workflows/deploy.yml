@@ -1,0 +1,117 @@
+# ──────────────────────────────────────────────────────────────
+# Sethu Dashboard — CI/CD Deployment Pipeline
+# Deploys to Azure VM on every push to the main branch.
+# ──────────────────────────────────────────────────────────────
+
+name: Deploy to Azure VM
+
+on:
+  push:
+    branches:
+      - main
+
+# Prevent overlapping deployments on rapid successive pushes
+concurrency:
+  group: production-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: 🚀 Deploy to Production
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          username: azureuser
+          key: ${{ secrets.SSH_KEY }}
+          # Timeout for the SSH connection (seconds)
+          timeout: 60s
+          # Timeout for the entire script execution (minutes)
+          command_timeout: 10m
+          script: |
+            set -euo pipefail
+
+            PROJECT_DIR=~/projects/Sethu_Dashboard
+
+            echo "========================================="
+            echo "🚀 Starting deployment — $(date)"
+            echo "========================================="
+
+            # ── 1. Navigate to project directory ──
+            cd "$PROJECT_DIR"
+            echo "📂 Working directory: $(pwd)"
+
+            # ── 2. Pull latest code ──
+            echo ""
+            echo "📥 Pulling latest code from main..."
+            git fetch --all
+            git reset --hard origin/main
+            echo "✅ Code updated to $(git rev-parse --short HEAD)"
+
+            # ── 3. Install backend dependencies ──
+            echo ""
+            echo "📦 Installing backend dependencies..."
+            cd "$PROJECT_DIR/backend"
+            npm ci --omit=dev
+            echo "✅ Backend dependencies installed"
+
+            # ── 4. Install frontend dependencies & build ──
+            echo ""
+            echo "📦 Installing frontend dependencies..."
+            cd "$PROJECT_DIR/frontend"
+            npm ci
+            echo "✅ Frontend dependencies installed"
+
+            echo ""
+            echo "🔨 Building frontend..."
+            npm run build
+            echo "✅ Frontend build complete"
+
+            # ── 5. Restart services ──
+            echo ""
+            echo "🔄 Restarting services..."
+
+            sudo systemctl restart sethu-backend.service
+            echo "✅ sethu-backend.service restarted"
+
+            sudo systemctl restart db-sync.service
+            echo "✅ db-sync.service restarted"
+
+            sudo systemctl restart nginx
+            echo "✅ nginx restarted"
+
+            # ── 6. Verify services are running ──
+            echo ""
+            echo "🩺 Verifying service status..."
+
+            if systemctl is-active --quiet sethu-backend.service; then
+              echo "✅ sethu-backend.service is active"
+            else
+              echo "❌ sethu-backend.service failed to start"
+              sudo journalctl -u sethu-backend.service --no-pager -n 20
+              exit 1
+            fi
+
+            if systemctl is-active --quiet db-sync.service; then
+              echo "✅ db-sync.service is active"
+            else
+              echo "❌ db-sync.service failed to start"
+              sudo journalctl -u db-sync.service --no-pager -n 20
+              exit 1
+            fi
+
+            if systemctl is-active --quiet nginx; then
+              echo "✅ nginx is active"
+            else
+              echo "❌ nginx failed to start"
+              sudo journalctl -u nginx --no-pager -n 20
+              exit 1
+            fi
+
+            echo ""
+            echo "========================================="
+            echo "🎉 Deployment successful — $(date)"
+            echo "========================================="
