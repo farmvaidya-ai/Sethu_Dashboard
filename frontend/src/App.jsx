@@ -113,13 +113,8 @@ function AppRoutes() {
 }
 
 import { Toaster } from 'react-hot-toast';
-import { useEffect } from 'react';
 
 function App() {
-  useEffect(() => {
-    console.log("CICD deployed successfully 🔥");
-  }, []);
-
   return (
     <div className="app-container">
       <DeactivationModal />
