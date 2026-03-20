@@ -51,6 +51,10 @@ jobs:
             git reset --hard origin/main
             echo "✅ Code updated to $(git rev-parse --short HEAD)"
 
+            export NVM_DIR="$HOME/.nvm"
+            source "$NVM_DIR/nvm.sh"
+            nvm use 20
+
             # ── 3. Install backend dependencies ──
             echo ""
             echo "📦 Installing backend dependencies..."
