@@ -18,6 +18,7 @@ const adminRoutes = require('./routes/admin.routes');
 const userRoutes = require('./routes/user.routes');
 const dataAdminRoutes = require('./routes/data.admin.routes');
 const paymentRoutes = require('./routes/payment.routes');
+const contactRoutes = require('./routes/contact.routes');
 const exotelRoutes = require('./routes/exotel.routes');
 const callMonitorService = require('./services/CallMonitorService');
 
@@ -47,6 +48,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api', authRoutes); // Fallback for /api/login, /api/me etc.
 app.use('/api/admin', adminRoutes);
 app.use('/api/user', userRoutes);
+app.use('/api/contacts', contactRoutes);
 app.use('/api/data-admin', dataAdminRoutes);
 app.use('/api/payment', paymentRoutes);
 app.use('/exotel', exotelRoutes); // Use /exotel base for webhooks as per prompt /exotel/incoming

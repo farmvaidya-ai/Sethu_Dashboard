@@ -3,8 +3,9 @@ import toast from 'react-hot-toast';
 import api, { adminAPI } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
-import { Phone, Settings, Send, ArrowLeft, Search, Download, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, ArrowUpDown, RefreshCw, Trash2, RotateCcw, ShieldAlert, Eye, EyeOff, X, CheckSquare, Square, MinusSquare, Megaphone, Info, PhoneOff } from 'lucide-react';
+import { Phone, Settings, Send, ArrowLeft, Search, Download, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, ArrowUpDown, RefreshCw, Trash2, RotateCcw, ShieldAlert, Eye, EyeOff, X, CheckSquare, Square, MinusSquare, Megaphone, Info, PhoneOff, Edit2 } from 'lucide-react';
 import CampaignTab from '../components/CampaignTab';
+import { STATES, DISTRICTS, MANDALS, VILLAGES } from '../data/india_locations';
 
 const ITEMS_PER_PAGE = 10;
 
@@ -14,7 +15,7 @@ const callDetailsCache = {};     // callId -> FROM phone number
 const callDetailsPending = {};   // callId -> Promise (deduplicates in-flight requests)
 const numberMetaPending = {};    // cleanPhone -> Promise
 
-const CallerDetails = ({ session }) => {
+const CallerDetails = ({ session, onEditContact, contactsMap }) => {
     const [displayPhone, setDisplayPhone] = useState('');
     const [metadata, setMetadata] = useState(null);
     const [loading, setLoading] = useState(false);
@@ -121,6 +122,12 @@ const CallerDetails = ({ session }) => {
 
     const displayMeta = metadata || (cachedInfo?.CircleName ? cachedInfo : null);
     const phone = displayPhone || initialPhone;
+    
+    // Dynamically resolve contact name via globally fetched contacts mapping using extremely accurate digits
+    const cleanPhoneForMap = (phone || '').replace(/\D/g, '').slice(-10);
+    let resolvedContactName = session.contact_name || (contactsMap && contactsMap[cleanPhoneForMap]?.name) || '';
+    if (typeof resolvedContactName === 'string') resolvedContactName = resolvedContactName.trim();
+    if (resolvedContactName === 'null') resolvedContactName = '';
 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', alignItems: 'center' }}>
@@ -128,6 +135,20 @@ const CallerDetails = ({ session }) => {
                 <Phone size={12} color="var(--primary)" />
                 <span style={{ wordBreak: 'break-all' }}>{phone || '-'}</span>
             </div>
+            {resolvedContactName ? (
+                <div style={{ color: 'var(--primary)', fontSize: '0.8rem', fontWeight: '800', textAlign: 'center', marginTop: '2px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    {resolvedContactName}
+                    <button onClick={(e) => { e.stopPropagation(); onEditContact && onEditContact(phone, resolvedContactName); }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary)', padding: '2px' }}>
+                        <Edit2 size={12} />
+                    </button>
+                </div>
+            ) : phone ? (
+                <div style={{ display: 'flex', justifyContent: 'center', marginTop: '2px' }}>
+                    <button onClick={(e) => { e.stopPropagation(); onEditContact && onEditContact(phone, ''); }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: '0.7rem', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        + Add Name
+                    </button>
+                </div>
+            ) : null}
             {displayMeta ? (
                 <div style={{ color: '#64748b', fontSize: '0.73rem', fontWeight: '500', lineHeight: '1.3', textAlign: 'center' }}>
                     {displayMeta.CircleName
@@ -449,6 +470,76 @@ export default function AgentDetails() {
     const [showCallModal, setShowCallModal] = useState(false);
     const [configForm, setConfigForm] = useState({ exophone: '', app_id: '' });
     const [callForm, setCallForm] = useState({ receiverNumber: '', receiverName: '' });
+
+    // Contact Modal State
+    const [showContactModal, setShowContactModal] = useState(false);
+    const [contactModalData, setContactModalData] = useState({ phone: '', name: '', village: '', mandal: '', district: '', pincode: '', state: '' });
+    const [savingContact, setSavingContact] = useState(false);
+    const [contactsMap, setContactsMap] = useState({});
+    const [loadingPincode, setLoadingPincode] = useState(false);
+
+    // Filter sessions to show within AgentDetails context
+
+    useEffect(() => {
+        if (!agentId) return;
+        api.get(`contacts/${agentId}`).then(res => {
+            if (res.data?.contacts) {
+                const map = {};
+                res.data.contacts.forEach(c => map[c.mobile_number] = c);
+                setContactsMap(map);
+            }
+        }).catch(() => {});
+    }, [agentId]);
+
+    const openContactModal = async (phone) => {
+        if (!phone) return;
+        const cleanPhone = phone.replace(/\D/g, '').slice(-10);
+        try {
+            const res = await api.get(`contacts/${agentId}/${cleanPhone}`);
+            if (res.data?.contact) {
+                setContactModalData({ phone, ...res.data.contact });
+            } else {
+                setContactModalData({ phone, name: '', village: '', mandal: '', district: '', pincode: '', state: '' });
+            }
+        } catch {
+            setContactModalData({ phone, name: '', village: '', mandal: '', district: '', pincode: '', state: '' });
+        }
+        setShowContactModal(true);
+    };
+
+    const handleSaveContact = async () => {
+        if (!contactModalData.phone) return;
+        setSavingContact(true);
+        try {
+            const cleanPhone = contactModalData.phone.replace(/\D/g, '').slice(-10);
+            const payload = { ...contactModalData };
+            delete payload.phone; // Do not send phone in body if not needed, or keep it
+            const res = await api.post(`contacts/${agentId}/${cleanPhone}`, payload);
+            if (res.data?.success) {
+                toast.success('Contact saved!');
+                // Update local contacts map
+                setContactsMap(prev => ({ ...prev, [cleanPhone]: { ...contactModalData, mobile_number: cleanPhone } }));
+
+                // Update local sessions matching this phone smoothly
+                setSessions(prev => prev.map(s => {
+                    let sPhone = s.customer_phone || '';
+                    if (!sPhone) {
+                        const cData = typeof s.custom_data === 'string' && s.custom_data.startsWith('{') ? JSON.parse(s.custom_data) : (s.custom_data || {});
+                        sPhone = s.phone || cData?.phone || '';
+                    }
+                    if (sPhone.replace(/\D/g, '').slice(-10) === cleanPhone) {
+                        return { ...s, contact_name: contactModalData.name };
+                    }
+                    return s;
+                }));
+                setShowContactModal(false);
+            }
+        } catch (err) {
+            toast.error('Failed to save contact');
+        } finally {
+            setSavingContact(false);
+        }
+    };
 
     // Close dropdowns when clicking outside
     useEffect(() => {
@@ -1373,7 +1464,7 @@ export default function AgentDetails() {
                                                         <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: '2px' }}>{formatSecondsToTime(session.duration_seconds)}</div>
                                                     </td>
                                                     <td className="clickable-cell" onClick={() => handleSessionClick(session.session_id)} style={{ padding: '0.875rem 1rem', verticalAlign: 'middle', textAlign: 'center' }}>
-                                                        <CallerDetails session={session} />
+                                                        <CallerDetails session={session} contactsMap={contactsMap} onEditContact={openContactModal} />
                                                     </td>
                                                     <td style={{ padding: '0.875rem 1rem', verticalAlign: 'middle', textAlign: 'left' }}>
                                                         {session.summary ? (
@@ -1942,6 +2033,165 @@ export default function AgentDetails() {
                     );
                 })()
             }
+
+            {/* Contact Edit Modal */}
+            {showContactModal && (
+                <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: '20px' }}>
+                    <div style={{ background: 'white', borderRadius: '16px', padding: '1.5rem', width: '100%', maxWidth: '480px', boxShadow: '0 10px 25px rgba(0,0,0,0.1)' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', paddingBottom: '0.75rem', borderBottom: '1px solid #f1f5f9' }}>
+                            <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                <h3 style={{ margin: 0, fontSize: '1.1rem', color: '#1e293b' }}>
+                                    Save Contact Detail
+                                </h3>
+                                <small style={{ color: '#64748b', fontWeight: '500' }}>Phone: {contactModalData.phone}</small>
+                            </div>
+                            <button onClick={() => setShowContactModal(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748b' }}><X size={20} /></button>
+                        </div>
+                        
+                        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '15px 12px', marginBottom: '1.5rem' }}>
+                            <div style={{ gridColumn: '1 / -1' }}>
+                                <label style={{ fontSize: '0.75rem', fontWeight: '700', color: '#64748b', textTransform: 'uppercase', marginBottom: '6px', display: 'flex', justifyContent: 'space-between' }}>
+                                    <span>Full Name <span style={{ color: '#ef4444' }}>*</span></span>
+                                    <span style={{ fontWeight: '400', fontSize: '0.65rem' }}>REQUIRED</span>
+                                </label>
+                                <input 
+                                    value={contactModalData.name} 
+                                    onChange={e => setContactModalData(p => ({ ...p, name: e.target.value }))} 
+                                    style={{ width: '100%', padding: '11px 14px', borderRadius: '10px', border: '1px solid #e2e8f0', background: '#f8fafc', fontSize: '0.9rem', outline: 'none' }} 
+                                    placeholder="Full Name" 
+                                />
+                            </div>
+
+                            <div style={{ gridColumn: '1 / -1' }}>
+                                <label style={{ fontSize: '0.75rem', fontWeight: '700', color: '#64748b', textTransform: 'uppercase', marginBottom: '6px', display: 'flex', justifyContent: 'space-between' }}>
+                                    <span>Pincode (Quick Auto-Fill)</span>
+                                    {loadingPincode && <span style={{ color: 'var(--primary)', fontSize: '0.65rem', fontWeight: '600' }}>SEARCHING...</span>}
+                                </label>
+                                <input 
+                                    type="text"
+                                    maxLength={6}
+                                    value={contactModalData.pincode} 
+                                    onChange={async (e) => {
+                                        const val = e.target.value.replace(/\D/g, '').slice(0, 6);
+                                        setContactModalData(p => ({ ...p, pincode: val }));
+                                        if (val.length === 6) {
+                                            setLoadingPincode(true);
+                                            try {
+                                                const res = await fetch(`https://api.postalpincode.in/pincode/${val}`);
+                                                const data = await res.json();
+                                                if (data?.[0]?.Status === "Success") {
+                                                    const info = data[0].PostOffice[0];
+                                                    setContactModalData(p => ({
+                                                        ...p,
+                                                        state: info.State,
+                                                        district: info.District,
+                                                        mandal: info.Block || info.Taluk || '',
+                                                        village: info.Name
+                                                    }));
+                                                    toast.success(`Populated: ${info.District}, ${info.State}`);
+                                                } else {
+                                                    toast.error('Pincode not found');
+                                                }
+                                            } catch (err) {
+                                                console.error('Pincode lookup failed', err);
+                                            } finally {
+                                                setLoadingPincode(false);
+                                            }
+                                        }
+                                    }} 
+                                    style={{ width: '100%', padding: '11px 14px', borderRadius: '10px', border: '2px solid #008F4B', background: '#f0fdf4', fontSize: '0.95rem', fontWeight: '600', outline: 'none' }} 
+                                    placeholder="Enter 6-digit pincode" 
+                                />
+                            </div>
+
+                            {/* Cascading State Dropdown */}
+                            <div>
+                                <label style={{ fontSize: '0.75rem', fontWeight: '700', color: '#64748b', textTransform: 'uppercase', marginBottom: '6px', display: 'block' }}>State</label>
+                                <select 
+                                    value={contactModalData.state} 
+                                    onChange={e => setContactModalData(p => ({ ...p, state: e.target.value, district: '', mandal: '', village: '' }))} 
+                                    style={{ width: '100%', padding: '10px 14px', borderRadius: '10px', border: '1px solid #e2e8f0', background: '#fff', fontSize: '0.9rem', outline: 'none' }}
+                                >
+                                    <option value="">Select State</option>
+                                    {STATES.map(s => <option key={s} value={s}>{s}</option>)}
+                                    {contactModalData.state && !STATES.includes(contactModalData.state) && <option value={contactModalData.state}>{contactModalData.state}</option>}
+                                </select>
+                            </div>
+
+                            {/* Cascading District Dropdown */}
+                            <div>
+                                <label style={{ fontSize: '0.75rem', fontWeight: '700', color: '#64748b', textTransform: 'uppercase', marginBottom: '6px', display: 'block' }}>District</label>
+                                <select 
+                                    value={contactModalData.district} 
+                                    disabled={!contactModalData.state}
+                                    onChange={e => setContactModalData(p => ({ ...p, district: e.target.value, mandal: '', village: '' }))}
+                                    style={{ width: '100%', padding: '10px 14px', borderRadius: '10px', border: '1px solid #e2e8f0', background: !contactModalData.state ? '#f1f5f9' : '#fff', fontSize: '0.9rem', outline: 'none' }}
+                                >
+                                    <option value="">Select District</option>
+                                    {(DISTRICTS[contactModalData.state] || []).map(d => <option key={d} value={d}>{d}</option>)}
+                                    {contactModalData.district && !(DISTRICTS[contactModalData.state] || []).includes(contactModalData.district) && <option value={contactModalData.district}>{contactModalData.district}</option>}
+                                </select>
+                            </div>
+
+                            {/* Searchable Mandal Dropdown */}
+                            <div>
+                                <label style={{ fontSize: '0.75rem', fontWeight: '700', color: '#64748b', textTransform: 'uppercase', marginBottom: '6px', display: 'block' }}>Mandal</label>
+                                <input 
+                                    list="mandal-list"
+                                    value={contactModalData.mandal} 
+                                    disabled={!contactModalData.district}
+                                    onChange={e => setContactModalData(p => ({ ...p, mandal: e.target.value, village: '' }))} 
+                                    style={{ width: '100%', padding: '10px 14px', borderRadius: '10px', border: '1px solid #e2e8f0', background: !contactModalData.district ? '#f1f5f9' : '#fff', fontSize: '0.9rem', outline: 'none' }} 
+                                    placeholder="Enter Mandal" 
+                                />
+                                <datalist id="mandal-list">
+                                    {(MANDALS[contactModalData.district] || []).map(m => <option key={m} value={m} />)}
+                                </datalist>
+                            </div>
+
+                            {/* Searchable Village Dropdown */}
+                            <div>
+                                <label style={{ fontSize: '0.75rem', fontWeight: '700', color: '#64748b', textTransform: 'uppercase', marginBottom: '6px', display: 'block' }}>Village</label>
+                                <input 
+                                    list="village-list"
+                                    value={contactModalData.village} 
+                                    disabled={!contactModalData.mandal}
+                                    onChange={e => setContactModalData(p => ({ ...p, village: e.target.value }))} 
+                                    style={{ width: '100%', padding: '10px 14px', borderRadius: '10px', border: '1px solid #e2e8f0', background: !contactModalData.mandal ? '#f1f5f9' : '#fff', fontSize: '0.9rem', outline: 'none' }} 
+                                    placeholder="Village" 
+                                />
+                                <datalist id="village-list">
+                                    {(VILLAGES[contactModalData.mandal] || []).map(v => <option key={v} value={v} />)}
+                                </datalist>
+                            </div>
+                        </div>
+                        
+                        <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', paddingTop: '15px' }}>
+                            <button onClick={() => setShowContactModal(false)} style={{ padding: '9px 18px', background: 'white', border: '1px solid #e2e8f0', borderRadius: '8px', color: '#475569', fontWeight: '600', cursor: 'pointer' }}>
+                                Cancel
+                            </button>
+                            <button 
+                                onClick={handleSaveContact} 
+                                disabled={savingContact || !contactModalData.name} 
+                                style={{ 
+                                    padding: '9px 24px', 
+                                    background: (savingContact || !contactModalData.name) ? '#cbd5e1' : 'var(--primary)', 
+                                    border: 'none', 
+                                    borderRadius: '8px', 
+                                    color: 'white', 
+                                    fontWeight: '600', 
+                                    cursor: (savingContact || !contactModalData.name) ? 'not-allowed' : 'pointer',
+                                    transition: 'all 0.2s',
+                                    boxShadow: !contactModalData.name ? 'none' : '0 4px 10px rgba(0, 143, 75, 0.2)'
+                                }}
+                            >
+                                {savingContact ? 'Saving...' : 'Save Contact'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
         </>
     );
 }
