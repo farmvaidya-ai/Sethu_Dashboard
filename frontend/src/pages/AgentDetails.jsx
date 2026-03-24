@@ -3,7 +3,7 @@ import toast from 'react-hot-toast';
 import api, { adminAPI } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
-import { Phone, Settings, Send, ArrowLeft, Search, Download, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, ArrowUpDown, RefreshCw, Trash2, RotateCcw, ShieldAlert, Eye, EyeOff, X, CheckSquare, Square, MinusSquare, Megaphone, Info, PhoneOff, Edit2 } from 'lucide-react';
+import { Phone, Settings, Send, ArrowLeft, Search, Download, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, ArrowUpDown, RefreshCw, Trash2, RotateCcw, ShieldAlert, Eye, EyeOff, X, CheckSquare, Square, MinusSquare, Megaphone, Info, PhoneOff, Edit2, Users } from 'lucide-react';
 import CampaignTab from '../components/CampaignTab';
 import { STATES, DISTRICTS, MANDALS, VILLAGES } from '../data/india_locations';
 
@@ -198,6 +198,92 @@ const confirmToast = (message, onConfirm) => {
             boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1)'
         }
     });
+};
+
+// --- CONTACTS TAB COMPONENT ---
+const ContactsTab = ({ agentId }) => {
+    const [contacts, setContacts] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [searchTerm, setSearchTerm] = useState('');
+
+    useEffect(() => {
+        const fetchContacts = async () => {
+            setLoading(true);
+            try {
+                const res = await api.get(`contacts/${agentId}`);
+                if (res.data?.success) {
+                    setContacts(res.data.contacts);
+                }
+            } catch (err) {
+                console.error("Error fetching contacts:", err);
+            } finally {
+                setLoading(false);
+            }
+        };
+        if (agentId) fetchContacts();
+    }, [agentId]);
+
+    const filteredContacts = contacts.filter(c => 
+        (c.name || '').toLowerCase().includes(searchTerm.toLowerCase()) || 
+        (c.mobile_number || '').includes(searchTerm) ||
+        (c.village || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+        (c.district || '').toLowerCase().includes(searchTerm.toLowerCase())
+    );
+
+    return (
+        <div style={{ padding: '1.5rem', background: 'white', borderRadius: '12px', boxShadow: '0 4px 12px rgba(0,0,0,0.05)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', flexWrap: 'wrap', gap: '1rem' }}>
+                <h3 style={{ margin: 0, fontSize: '1.1rem', color: '#1e293b' }}>Saved Contacts</h3>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0', padding: '0.5rem 0.875rem' }}>
+                    <Search size={16} style={{ color: '#94a3b8' }} />
+                    <input
+                        type="text"
+                        placeholder="Search name, phone or location..."
+                        value={searchTerm}
+                        onChange={(e) => setSearchTerm(e.target.value)}
+                        style={{ border: 'none', background: 'transparent', fontSize: '0.875rem', outline: 'none', width: '250px' }}
+                    />
+                </div>
+            </div>
+
+            {loading ? (
+                <div style={{ padding: '3rem', textAlign: 'center', color: '#64748b' }}>Loading contacts...</div>
+            ) : (
+                <div className="table-container" style={{ overflowX: 'auto' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+                        <thead style={{ background: '#f8f9fa', color: '#64748b', fontSize: '0.8rem', textTransform: 'uppercase' }}>
+                            <tr>
+                                <th style={{ padding: '1rem' }}>Name</th>
+                                <th style={{ padding: '1rem' }}>Phone</th>
+                                <th style={{ padding: '1rem' }}>Location</th>
+                                <th style={{ padding: '1rem' }}>Added Date</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {filteredContacts.length > 0 ? filteredContacts.map(contact => (
+                                <tr key={contact.id || contact.mobile_number} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                                    <td style={{ padding: '1rem', fontWeight: '600', color: '#1e293b' }}>{contact.name || '-'}</td>
+                                    <td style={{ padding: '1rem', color: '#475569', fontWeight: '500' }}>{contact.mobile_number}</td>
+                                    <td style={{ padding: '1rem', color: '#475569', fontSize: '0.85rem' }}>
+                                        {[contact.village, contact.mandal, contact.district, contact.state].filter(Boolean).join(', ') || '-'}
+                                    </td>
+                                    <td style={{ padding: '1rem', color: '#94a3b8', fontSize: '0.85rem' }}>
+                                        {contact.created_at ? new Date(contact.created_at).toLocaleDateString() : '-'}
+                                    </td>
+                                </tr>
+                            )) : (
+                                <tr>
+                                    <td colSpan="4" style={{ padding: '3rem', textAlign: 'center', color: '#94a3b8' }}>
+                                        {searchTerm ? 'No contacts found matching search.' : 'No contacts saved yet.'}
+                                    </td>
+                                </tr>
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+        </div>
+    );
 };
 
 // --- MISSED CALLS TAB COMPONENT ---
@@ -438,6 +524,9 @@ export default function AgentDetails() {
     const [endDate, setEndDate] = useState('');
     const [updatingStatus, setUpdatingStatus] = useState({});
 
+    const [circleFilter, setCircleFilter] = useState(searchParams.get('circle') || 'all');
+    const [availableCircles, setAvailableCircles] = useState([]);
+
     // Recycle Bin State
     const [recycleBinOpen, setRecycleBinOpen] = useState(false);
     const [excludedSessions, setExcludedSessions] = useState([]);
@@ -565,12 +654,6 @@ export default function AgentDetails() {
         }
     }, [agentId]);
 
-    useEffect(() => {
-        if (agentId) {
-            fetchTelephonyConfig();
-        }
-    }, [fetchTelephonyConfig, agentId]);
-
     const handleSaveConfig = async () => {
         try {
             await api.post('telephony/config', {
@@ -585,6 +668,25 @@ export default function AgentDetails() {
             toast.error('Failed to save config: ' + (err.response?.data?.error || err.message));
         }
     };
+
+    // Fetch available circles from session history
+    const fetchAvailableCircles = useCallback(async () => {
+        try {
+            const res = await api.get(`agents/${agentId}/circles`);
+            if (res.data?.success && res.data.circles) {
+                setAvailableCircles(res.data.circles);
+            }
+        } catch (err) {
+            console.error('Error fetching circles:', err);
+        }
+    }, [agentId]);
+
+    useEffect(() => {
+        if (agentId) {
+            fetchTelephonyConfig();
+            fetchAvailableCircles();
+        }
+    }, [fetchTelephonyConfig, fetchAvailableCircles, agentId]);
 
     const handleCallSession = (session) => {
         const isExempt = user?.role === 'super_admin' || user?.id === 'master_root_0';
@@ -693,9 +795,10 @@ export default function AgentDetails() {
                 limit: ITEMS_PER_PAGE,
                 sortBy,
                 sortOrder,
-                search: searchTerm,
+                search: searchParams.get('search') || '',
                 show_hidden: showHiddenSessions,
                 ...(reviewFilter !== 'all' && { review_status: reviewFilter }),
+                ...(circleFilter !== 'all' && { circle: circleFilter }),
                 ...(startDate && { startDate }),
                 ...(endDate && { endDate }),
             });
@@ -705,7 +808,7 @@ export default function AgentDetails() {
             if (res.data && res.data.data) {
                 setSessions(res.data.data);
                 setTotalPages(res.data.pagination?.totalPages || 1);
-                setTotalSessions(res.data.pagination?.total || 0);
+                setTotalSessions(res.data.pagination?.total || 1); // fallback to 1 to avoid totalSessions 0 blinking
                 if (res.data.data.length > 0) {
                     setAgentName(res.data.data[0].agent_name || agentId);
                 }
@@ -733,7 +836,7 @@ export default function AgentDetails() {
         } finally {
             setLoading(false);
         }
-    }, [agentId, currentPage, sortBy, sortOrder, searchTerm, showHiddenSessions, reviewFilter, startDate, endDate]);
+    }, [agentId, currentPage, sortBy, sortOrder, searchParams, showHiddenSessions, reviewFilter, circleFilter, startDate, endDate]);
 
     // Fetch agent details for creation date
     const fetchAgentDetails = useCallback(async () => {
@@ -758,7 +861,6 @@ export default function AgentDetails() {
 
 
     useEffect(() => {
-        if (sessions.length === 0) setLoading(true);
         fetchSessions();
         fetchAgentDetails();
 
@@ -770,7 +872,7 @@ export default function AgentDetails() {
         }, 30000);
 
         return () => clearInterval(interval);
-    }, [fetchSessions, fetchAgentDetails, sessions.length]);
+    }, [fetchSessions, fetchAgentDetails]);
 
     // Debounce search
     useEffect(() => {
@@ -1212,20 +1314,36 @@ export default function AgentDetails() {
                                 <PhoneOff size={16} /> Missed Calls
                             </button>
                             {isAdmin && (
-                                <button
-                                    onClick={() => updateSearchParams({ tab: 'campaigns' })}
-                                    style={{
-                                        padding: '0.7rem 1.25rem', border: 'none', cursor: 'pointer',
-                                        fontWeight: activeTab === 'campaigns' ? '600' : '400', fontSize: '0.95rem',
-                                        color: activeTab === 'campaigns' ? '#008F4B' : '#64748b',
-                                        background: 'transparent',
-                                        borderBottom: activeTab === 'campaigns' ? '2px solid #008F4B' : '2px solid transparent',
-                                        marginBottom: '-2px', transition: 'all 0.2s',
-                                        display: 'flex', alignItems: 'center', gap: '8px'
-                                    }}
-                                >
-                                    <Megaphone size={16} /> Campaigns
-                                </button>
+                                <>
+                                    <button
+                                        onClick={() => updateSearchParams({ tab: 'contacts' })}
+                                        style={{
+                                            padding: '0.7rem 1.25rem', border: 'none', cursor: 'pointer',
+                                            fontWeight: activeTab === 'contacts' ? '600' : '400', fontSize: '0.95rem',
+                                            color: activeTab === 'contacts' ? '#008F4B' : '#64748b',
+                                            background: 'transparent',
+                                            borderBottom: activeTab === 'contacts' ? '2px solid #008F4B' : '2px solid transparent',
+                                            marginBottom: '-2px', transition: 'all 0.2s',
+                                            display: 'flex', alignItems: 'center', gap: '8px'
+                                        }}
+                                    >
+                                        <Users size={16} /> Contacts
+                                    </button>
+                                    <button
+                                        onClick={() => updateSearchParams({ tab: 'campaigns' })}
+                                        style={{
+                                            padding: '0.7rem 1.25rem', border: 'none', cursor: 'pointer',
+                                            fontWeight: activeTab === 'campaigns' ? '600' : '400', fontSize: '0.95rem',
+                                            color: activeTab === 'campaigns' ? '#008F4B' : '#64748b',
+                                            background: 'transparent',
+                                            borderBottom: activeTab === 'campaigns' ? '2px solid #008F4B' : '2px solid transparent',
+                                            marginBottom: '-2px', transition: 'all 0.2s',
+                                            display: 'flex', alignItems: 'center', gap: '8px'
+                                        }}
+                                    >
+                                        <Megaphone size={16} /> Campaigns
+                                    </button>
+                                </>
                             )}
                         </div>
                     </div>
@@ -1334,9 +1452,9 @@ export default function AgentDetails() {
                                             style={{ border: 'none', background: 'transparent', padding: '0.625rem 0', fontSize: '0.8rem', outline: 'none', color: '#475569', cursor: 'pointer', fontFamily: 'inherit' }}
                                         />
                                     </div>
-                                    {(searchTerm || startDate || endDate || reviewFilter !== 'all') && (
+                                    {(searchTerm || startDate || endDate || reviewFilter !== 'all' || circleFilter !== 'all') && (
                                         <button
-                                            onClick={() => { setSearchTerm(''); setStartDate(''); setEndDate(''); setReviewFilter('all'); setCurrentPage(1); }}
+                                            onClick={() => { setSearchTerm(''); setStartDate(''); setEndDate(''); setReviewFilter('all'); setCircleFilter('all'); updateSearchParams({ circle: null, page: 1 }); setCurrentPage(1); }}
                                             style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '0.5rem 0.875rem', background: '#fff1f2', border: '1px solid #fecaca', borderRadius: '8px', color: '#e11d48', fontSize: '0.8rem', fontWeight: '600', cursor: 'pointer', whiteSpace: 'nowrap' }}
                                         >
                                             <X size={13} /> Clear All
@@ -1365,7 +1483,35 @@ export default function AgentDetails() {
                                             >{label}</button>
                                         ))}
                                     </div>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                    <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center', marginLeft: '12px' }}>
+                                        <span style={{ fontSize: '0.75rem', color: '#94a3b8', fontWeight: '600', marginRight: '4px' }}>Circle:</span>
+                                        <select
+                                            value={circleFilter}
+                                            onChange={(e) => { 
+                                                const val = e.target.value;
+                                                setCircleFilter(val); 
+                                                setCurrentPage(1); 
+                                                updateSearchParams({ circle: val === 'all' ? null : val, page: 1 });
+                                            }}
+                                            style={{
+                                                padding: '4px 12px',
+                                                border: '1px solid #e2e8f0',
+                                                background: 'white',
+                                                color: '#1e293b',
+                                                borderRadius: '8px',
+                                                cursor: 'pointer',
+                                                fontSize: '0.85rem',
+                                                fontWeight: '500',
+                                                outline: 'none'
+                                            }}
+                                        >
+                                            <option value="all">All</option>
+                                            {availableCircles.map(circle => (
+                                                <option key={circle} value={circle}>{circle}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginLeft: 'auto' }}>
                                         <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>
                                             {sessions.length} of {totalSessions.toLocaleString()} sessions
                                         </span>
@@ -1714,6 +1860,12 @@ export default function AgentDetails() {
                         {
                             activeTab === 'missed-calls' && (
                                 <MissedCallsTab agentId={agentId} />
+                            )
+                        }
+
+                        {
+                            activeTab === 'contacts' && (
+                                <ContactsTab agentId={agentId} />
                             )
                         }
 

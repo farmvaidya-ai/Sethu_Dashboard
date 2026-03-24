@@ -1585,6 +1585,36 @@ app.get('/api/active-sessions', async (req, res) => {
 
 // Missed Calls logic moved to top of routes section
 
+// Get Distinct Circles for Agent
+app.get('/api/agents/:agentId/circles', async (req, res) => {
+    const { agentId } = req.params;
+    try {
+        // Collect circles across multiple possible sources:
+        // 1. Current environment's Sessions table (with cached caller_info)
+        // 2. Production Sessions table (fallback for 'already fetched' legacy sync data)
+        // 3. Current environment's Contacts table (profile data)
+        const result = await pool.query(
+            `SELECT DISTINCT circle FROM (
+                SELECT COALESCE(caller_info->>'CircleName', caller_info->>'Circle') as circle 
+                FROM "${getTableName('Sessions')}" 
+                WHERE agent_id = $1 AND (caller_info IS NOT NULL OR metadata::text ILIKE '%Circle%')
+                UNION
+                SELECT COALESCE(caller_info->>'CircleName', caller_info->>'Circle') as circle 
+                FROM "Sessions" 
+                WHERE agent_id = $1 AND (caller_info IS NOT NULL OR metadata::text ILIKE '%Circle%')
+                UNION
+                SELECT state as circle 
+                FROM "${getTableName('Contacts')}" 
+                WHERE agent_id = $1 AND state IS NOT NULL
+            ) sub WHERE circle IS NOT NULL AND circle != ''`,
+            [agentId]
+        );
+        res.json({ success: true, circles: result.rows.map(r => r.circle).filter(Boolean) });
+    } catch (err) {
+        console.error('Error fetching circles:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
 // Get Sessions for Agent
 app.get(['/api/sessions', '/api/api/sessions'], async (req, res) => {
     const { agent_id, page = 1, limit = 10, sortBy = 'started_at', sortOrder = 'desc', search = '', review_status = '', startDate = '', endDate = '' } = req.query;
@@ -1636,6 +1666,13 @@ app.get(['/api/sessions', '/api/api/sessions'], async (req, res) => {
             params.push(review_status);
         }
 
+        // Circle Filter
+        if (req.query.circle && req.query.circle !== 'all') {
+            paramCount++;
+            query += ` AND (s.caller_info->>'CircleName' = $${paramCount} OR s.caller_info->>'Circle' = $${paramCount})`;
+            params.push(req.query.circle);
+        }
+
         // Date range filter — compare using IST (Asia/Kolkata) so midnight boundary is correct
         if (startDate) {
             paramCount++;
@@ -1664,6 +1701,11 @@ app.get(['/api/sessions', '/api/api/sessions'], async (req, res) => {
             countParamIdx++;
             countQuery += ` AND c.review_status = $${countParamIdx}`;
             countParams.push(review_status);
+        }
+        if (req.query.circle && req.query.circle !== 'all') {
+            countParamIdx++;
+            countQuery += ` AND (s.caller_info->>'CircleName' = $${countParamIdx} OR s.caller_info->>'Circle' = $${countParamIdx})`;
+            countParams.push(req.query.circle);
         }
         if (startDate) {
             countParamIdx++;
