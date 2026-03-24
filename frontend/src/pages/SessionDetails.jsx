@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import api from '../services/api';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Phone, Calendar, Clock, MessageSquare, ChevronRight, User, MapPin, Tag, Download, Trash2, ShieldAlert, Check, X, FileText, Info, Edit2, Play, Pause, FastForward, Rewind, Volume2, Search, ExternalLink, Globe } from 'lucide-react';
+import { Phone, Calendar, Clock, MessageSquare, ChevronRight, User, MapPin, Tag, Download, Trash2, ShieldAlert, Check, X, FileText, Info, Edit2, Play, Pause, FastForward, Rewind, Volume2, Search, ExternalLink, Globe, ArrowLeft, RefreshCw, AlertCircle, Copy, Save, Bot, ChevronDown, ChevronUp, ChevronLeft } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { STATES, DISTRICTS, MANDALS, VILLAGES } from '../data/india_locations';
 
@@ -18,6 +18,8 @@ export default function SessionDetails() {
     const [conversation, setConversation] = useState(null);
     const [session, setSession] = useState(null);
     const [loading, setLoading] = useState(true);
+    const [copied, setCopied] = useState(false);
+    const [downloadOpen, setDownloadOpen] = useState(false);
     const [reviewing, setReviewing] = useState(false);
     const [loadingPincode, setLoadingPincode] = useState(false);
 
