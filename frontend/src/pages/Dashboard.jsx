@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { adminAPI } from '../services/api';
 import toast from 'react-hot-toast';
 import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
-import { Users, MessageSquare, Clock, Search, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, ArrowUpDown, Lock, Trash2, Activity, RotateCcw, ShieldAlert, X, EyeOff, CheckSquare, Square, MinusSquare, PhoneIncoming } from 'lucide-react';
+import { Users, MessageSquare, Clock, Search, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, ArrowUpDown, Lock, Trash2, Activity, RotateCcw, ShieldAlert, X, EyeOff, CheckSquare, Square, MinusSquare, PhoneIncoming, HardDrive } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
 const ITEMS_PER_PAGE = 10;
@@ -48,6 +48,8 @@ export default function Dashboard() {
     const [isSidebarOpen, setIsSidebarOpen] = useState(false);
     const [agents, setAgents] = useState([]);
     const [stats, setStats] = useState({ totalAgents: 0, totalSessions: 0, successRate: 0 });
+    const [storageMetrics, setStorageMetrics] = useState({ totalBytes: 0, byUser: [], byAgent: [] });
+    const [loadingStorage, setLoadingStorage] = useState(false);
     const [activeSessions, setActiveSessions] = useState({ agents: [], totalActiveSessions: 0, agentsWithActiveSessions: 0 });
     const [loading, setLoading] = useState(true);
     const navigate = useNavigate();
@@ -279,6 +281,21 @@ export default function Dashboard() {
         }
     }, []);
 
+    const fetchStorageMetrics = useCallback(async () => {
+        if (!isAnalyticsPage) return;
+        setLoadingStorage(true);
+        try {
+            const res = await adminAPI.getStorageMetrics();
+            if (res.data?.success) {
+                setStorageMetrics(res.data.metrics);
+            }
+        } catch (err) {
+            console.error('Error fetching storage metrics:', err);
+        } finally {
+            setLoadingStorage(false);
+        }
+    }, [isAnalyticsPage]);
+
     const fetchActiveSessions = useCallback(async () => {
         try {
             const res = await adminAPI.getActiveSessions();
@@ -297,6 +314,9 @@ export default function Dashboard() {
         fetchStats();
         fetchAgents();
         fetchActiveSessions();
+        if (isAnalyticsPage) {
+            fetchStorageMetrics();
+        }
 
         if (canSeeHidden) {
             fetchRecycleBin();
@@ -395,6 +415,78 @@ export default function Dashboard() {
                                     <span style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
                                         {hiddenAgents.length} hidden, {excludedAgents.length} blocked
                                     </span>
+                                </div>
+                            )}
+                            <div style={{ background: 'white', border: '1px solid var(--border)', borderRadius: '12px', padding: '20px', display: 'flex', flexDirection: 'column' }}>
+                                <span style={{ color: 'var(--text-muted)', fontSize: '13px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.05em', display: 'flex', alignItems: 'center', gap: '6px' }}><HardDrive size={14} /> Database Storage</span>
+                                <span style={{ fontSize: '28px', fontWeight: '800', color: 'var(--text)', marginTop: '8px' }}>
+                                    {loadingStorage ? '...' : (storageMetrics.totalBytes / (1024 * 1024)).toFixed(2)} MB
+                                </span>
+                                <span style={{ fontSize: '13px', fontWeight: '500', color: 'var(--text-muted)', marginTop: '8px' }}>
+                                    Disk footprint of transcripts & local data
+                                </span>
+                            </div>
+                        </div>
+
+                        {/* Detailed Storage Tables */}
+                        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '20px', marginBottom: '24px' }}>
+                            {canSeeHidden && storageMetrics.byUser.length > 0 && (
+                                <div style={{ background: 'white', border: '1px solid var(--border)', borderRadius: '12px', overflow: 'hidden' }}>
+                                    <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border)', background: '#f8fafc' }}>
+                                        <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: '600', color: '#1e293b' }}>Storage by User</h3>
+                                    </div>
+                                    <div style={{ maxHeight: '300px', overflowY: 'auto' }}>
+                                        <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+                                            <thead style={{ position: 'sticky', top: 0, background: 'white' }}>
+                                                <tr>
+                                                    <th style={{ padding: '12px 20px', borderBottom: '1px solid #e2e8f0', color: '#64748b', fontSize: '0.75rem', fontWeight: '600', textTransform: 'uppercase' }}>User</th>
+                                                    <th style={{ padding: '12px 20px', borderBottom: '1px solid #e2e8f0', color: '#64748b', fontSize: '0.75rem', fontWeight: '600', textTransform: 'uppercase', width: '120px', textAlign: 'right' }}>Data Used</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {storageMetrics.byUser.map(u => (
+                                                    <tr key={u.user_id} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                                                        <td style={{ padding: '12px 20px', fontSize: '0.85rem', fontWeight: '500', color: '#334155' }}>
+                                                            {u.user_name || 'System / Default'}
+                                                        </td>
+                                                        <td style={{ padding: '12px 20px', fontSize: '0.85rem', fontWeight: '600', color: '#0f172a', textAlign: 'right' }}>
+                                                            {(u.bytes / (1024 * 1024)).toFixed(2)} MB
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
+
+                            {storageMetrics.byAgent.length > 0 && (
+                                <div style={{ background: 'white', border: '1px solid var(--border)', borderRadius: '12px', overflow: 'hidden', gridColumn: (!canSeeHidden || storageMetrics.byUser.length === 0) ? '1 / -1' : 'auto' }}>
+                                    <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border)', background: '#f8fafc' }}>
+                                        <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: '600', color: '#1e293b' }}>Storage by Agent</h3>
+                                    </div>
+                                    <div style={{ maxHeight: '300px', overflowY: 'auto' }}>
+                                        <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+                                            <thead style={{ position: 'sticky', top: 0, background: 'white' }}>
+                                                <tr>
+                                                    <th style={{ padding: '12px 20px', borderBottom: '1px solid #e2e8f0', color: '#64748b', fontSize: '0.75rem', fontWeight: '600', textTransform: 'uppercase' }}>Agent</th>
+                                                    <th style={{ padding: '12px 20px', borderBottom: '1px solid #e2e8f0', color: '#64748b', fontSize: '0.75rem', fontWeight: '600', textTransform: 'uppercase', width: '120px', textAlign: 'right' }}>Data Used</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {storageMetrics.byAgent.map(a => (
+                                                    <tr key={a.agent_id} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                                                        <td style={{ padding: '12px 20px', fontSize: '0.85rem', fontWeight: '500', color: '#334155' }}>
+                                                            {a.agent_name || 'Unnamed Agent'}
+                                                        </td>
+                                                        <td style={{ padding: '12px 20px', fontSize: '0.85rem', fontWeight: '600', color: '#0f172a', textAlign: 'right' }}>
+                                                            {(a.bytes / (1024 * 1024)).toFixed(2)} MB
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
                                 </div>
                             )}
                         </div>

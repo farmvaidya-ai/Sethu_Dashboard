@@ -49,6 +49,7 @@ api.interceptors.response.use(
 export const adminAPI = {
     getAllAgents: (params) => api.get('agents', { params }),
     getStats: () => api.get('stats'),
+    getStorageMetrics: () => api.get('storage/metrics'),
     getActiveSessions: () => api.get('active-sessions'),
     deleteAgent: (agentId, permanent) => api.delete(`agents/${agentId}`, { params: { permanent } }),
     deleteSession: (sessionId, permanent) => api.delete(`sessions/${sessionId}`, { params: { permanent } }),

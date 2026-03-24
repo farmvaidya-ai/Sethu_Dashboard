@@ -458,6 +458,30 @@ const initDatabase = async () => {
             console.error(`Error creating Agent_Telephony_Config table:`, tableErr.message);
         }
 
+        // Create Contacts table
+        console.log(`Checking/Creating table: ${getTableName('Contacts')}...`);
+        try {
+            await pool.query(`
+                CREATE TABLE IF NOT EXISTS "${getTableName('Contacts')}" (
+                    id SERIAL PRIMARY KEY,
+                    agent_id TEXT NOT NULL,
+                    mobile_number TEXT NOT NULL,
+                    name TEXT,
+                    village TEXT,
+                    mandal TEXT,
+                    district TEXT,
+                    pincode TEXT,
+                    state TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(agent_id, mobile_number)
+                )
+            `);
+            console.log(`✅ ${getTableName('Contacts')} table initialized`);
+        } catch (tableErr) {
+            console.error(`Error creating Contacts table:`, tableErr.message);
+        }
+
         // Create System_Settings table for throttle & other global configs
         console.log(`Checking/Creating table: ${getTableName('System_Settings')}...`);
         try {
@@ -1364,6 +1388,108 @@ app.get('/api/stats', async (req, res) => {
     }
 });
 
+// Get Storage/Data consumption metrics
+app.get('/api/storage/metrics', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'No token' });
+
+    const token = authHeader.split(' ')[1];
+    let requesterId = null;
+    let isMaster = false;
+
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET_ACTIVE);
+        requesterId = decoded.userId;
+        isMaster = decoded.isMaster && requesterId === 'master_root_0';
+    } catch (err) {
+        return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+
+    try {
+        let userRole = 'user';
+        if (isMaster) {
+            userRole = 'super_admin';
+        } else {
+            const userRes = await pool.query(`SELECT role FROM "${getTableName('Users')}" WHERE user_id = $1`, [requesterId]);
+            if (userRes.rows[0]) userRole = userRes.rows[0].role;
+        }
+
+        const metrics = { totalBytes: 0, byUser: [], byAgent: [], physicalDbBytes: 0, allDatabases: [] };
+        
+        try {
+            const allDbsRes = await pool.query(`SELECT datname, pg_database_size(datname) as size_bytes FROM pg_database WHERE datistemplate = false`);
+            metrics.allDatabases = allDbsRes.rows.map(r => ({ name: r.datname, size: parseInt(r.size_bytes || 0) }));
+            const currentDb = metrics.allDatabases.find(d => d.name === process.env.POSTGRES_DB || 'postgres');
+            metrics.physicalDbBytes = currentDb ? currentDb.size : 0;
+        } catch (dbErr) {
+            console.error("Secondary DB size query failed:", dbErr.message);
+        }
+
+        const agentSizeQuery = `
+            SELECT
+                a.agent_id, a.name as agent_name,
+                pg_column_size(a.*) + 
+                COALESCE((SELECT SUM(pg_column_size(s.*)) FROM "${getTableName('Sessions')}" s WHERE s.agent_id = a.agent_id), 0) +
+                COALESCE((SELECT SUM(pg_column_size(c.*)) FROM "${getTableName('Conversations')}" c WHERE c.agent_id = a.agent_id), 0) as bytes
+            FROM "${getTableName('Agents')}" a
+        `;
+
+        if (userRole === 'super_admin') {
+            // Overall global sizes - Use whole table disk sizes instead of row averages
+            const totalRes = await pool.query(`
+                SELECT 
+                    (SELECT COALESCE(SUM(pg_total_relation_size('"' || tablename || '"')), 0) 
+                     FROM pg_tables WHERE schemaname = 'public') AS total_bytes
+            `);
+            metrics.totalBytes = parseInt(totalRes.rows[0].total_bytes || 0);
+
+            const agentSizeQueryFull = `
+                SELECT
+                    a.agent_id, a.name as agent_name,
+                    (pg_total_relation_size('"${getTableName('Agents')}"') / (SELECT COUNT(*) + 1 FROM "${getTableName('Agents')}")) + 
+                    COALESCE((SELECT SUM(pg_column_size(s.*)) FROM "${getTableName('Sessions')}" s WHERE s.agent_id = a.agent_id), 0) +
+                    COALESCE((SELECT SUM(pg_column_size(c.*)) FROM "${getTableName('Conversations')}" c WHERE c.agent_id = a.agent_id), 0) as bytes
+                FROM "${getTableName('Agents')}" a
+            `;
+            // Note: Individual agent calc still uses pg_column_size as total_relation_size for single rows isn't possible, 
+            // but we use the global total for the main summary.
+            
+            // By Agent
+            const agentRes = await pool.query(`${agentSizeQuery} ORDER BY bytes DESC`);
+            metrics.byAgent = agentRes.rows.map(r => ({ ...r, bytes: parseInt(r.bytes || 0) }));
+
+            // By User
+            const userRes = await pool.query(`
+                SELECT 
+                    u.user_id, u.email as user_name, u.email as user_email,
+                    COALESCE(SUM(sub.bytes), 0) as bytes
+                FROM "${getTableName('Users')}" u
+                LEFT JOIN "${getTableName('User_Agents')}" ua ON ua.user_id = u.user_id
+                LEFT JOIN (${agentSizeQuery}) sub ON sub.agent_id = ua.agent_id
+                GROUP BY u.user_id, u.email
+                ORDER BY bytes DESC
+            `);
+            metrics.byUser = userRes.rows.map(r => ({ ...r, bytes: parseInt(r.bytes || 0) }));
+        } else {
+            // Admin / Regular user
+            const myAgentsRes = await pool.query(`
+                SELECT sub.* 
+                FROM "${getTableName('User_Agents')}" ua
+                INNER JOIN (${agentSizeQuery}) sub ON sub.agent_id = ua.agent_id
+                WHERE ua.user_id = $1
+                ORDER BY sub.bytes DESC
+            `, [requesterId]);
+            metrics.byAgent = myAgentsRes.rows.map(r => ({ ...r, bytes: parseInt(r.bytes || 0) }));
+            metrics.totalBytes = metrics.byAgent.reduce((sum, a) => sum + a.bytes, 0);
+        }
+
+        res.json({ success: true, metrics });
+    } catch (error) {
+        console.error("Error fetching storage metrics:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Get Active Sessions (live count per agent)
 app.get('/api/active-sessions', async (req, res) => {
     const authHeader = req.headers.authorization;
@@ -1473,10 +1599,13 @@ app.get(['/api/sessions', '/api/api/sessions'], async (req, res) => {
         // Join with Conversations to get summary and review status, and Users to get reviewer email
         // DISTINCT ON prevents duplicate rows when a session has multiple Conversation records
         let query = `
-            SELECT DISTINCT ON (s.session_id) s.*, c.summary, c.review_status, c.reviewed_by, c.reviewed_at, u.email as reviewer_email
+            SELECT DISTINCT ON (s.session_id) s.*, c.summary, c.review_status, c.reviewed_by, c.reviewed_at, u.email as reviewer_email,
+            ct.name as contact_name
             FROM "${getTableName('Sessions')}" s 
             LEFT JOIN "${getTableName('Conversations')}" c ON s.session_id = c.session_id
             LEFT JOIN "${getTableName('Users')}" u ON c.reviewed_by = u.user_id
+            LEFT JOIN "${getTableName('Contacts')}" ct ON s.agent_id = ct.agent_id AND 
+            (ct.mobile_number = s.customer_phone OR ct.mobile_number = RIGHT(s.customer_phone, 10) OR ct.mobile_number = s.caller_info->>'phone')
             WHERE s.agent_id = $1
         `;
         let params = [agent_id];
@@ -1610,6 +1739,69 @@ app.get(['/api/sessions', '/api/api/sessions'], async (req, res) => {
         });
     } catch (error) {
         console.error("Error fetching sessions:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get Contact Information for an Agent
+app.get('/api/contacts/:agentId', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'No token' });
+    const { agentId } = req.params;
+    try {
+        const result = await pool.query(
+            `SELECT * FROM "${getTableName('Contacts')}" WHERE agent_id = $1`,
+            [agentId]
+        );
+        res.json({ success: true, contacts: result.rows });
+    } catch (error) {
+        console.error("Error fetching agent contacts:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get Single Contact Information
+app.get('/api/contacts/:agentId/:mobileNumber', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'No token' });
+    const { agentId, mobileNumber } = req.params;
+    try {
+        const result = await pool.query(
+            `SELECT * FROM "${getTableName('Contacts')}" WHERE agent_id = $1 AND mobile_number = $2`,
+            [agentId, mobileNumber]
+        );
+        res.json({ success: true, contact: result.rows[0] || null });
+    } catch (error) {
+        console.error("Error fetching contact:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Save Contact Information
+app.post('/api/contacts/:agentId/:mobileNumber', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'No token' });
+    const { agentId, mobileNumber } = req.params;
+    const { name, village, mandal, district, pincode, state } = req.body;
+    try {
+        const query = `
+            INSERT INTO "${getTableName('Contacts')}" (agent_id, mobile_number, name, village, mandal, district, pincode, state, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP)
+            ON CONFLICT (agent_id, mobile_number) 
+            DO UPDATE SET 
+                name = EXCLUDED.name,
+                village = EXCLUDED.village,
+                mandal = EXCLUDED.mandal,
+                district = EXCLUDED.district,
+                pincode = EXCLUDED.pincode,
+                state = EXCLUDED.state,
+                updated_at = CURRENT_TIMESTAMP
+            RETURNING *;
+        `;
+        const result = await pool.query(query, [agentId, mobileNumber, name, village, mandal, district, pincode, state]);
+        res.json({ success: true, contact: result.rows[0] });
+    } catch (error) {
+        console.error("Error saving contact:", error);
         res.status(500).json({ error: error.message });
     }
 });

@@ -10,9 +10,12 @@ const UsageLog = require('./UsageLog');
 const ActiveCall = require('./ActiveCall');
 const MissedCall = require('./MissedCall');
 
+const Contact = require('./Contact');
+
 module.exports = {
     Agent,
     AuditLog,
+    Contact,
     ExcludedItem,
     PasswordResetToken,
     Session,

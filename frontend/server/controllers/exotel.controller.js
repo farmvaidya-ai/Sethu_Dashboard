@@ -296,7 +296,7 @@ export const handleStatusCallback = async (req, res) => {
 
             if (userId) {
                 let durationSeconds = parseInt(Duration) || 0;
-                
+
                 // Fallback: Use Timestamps if Duration is 0 but it's completed
                 if (durationSeconds === 0 && Status === 'completed' && params.StartTime && params.EndTime) {
                     const start = new Date(params.StartTime);

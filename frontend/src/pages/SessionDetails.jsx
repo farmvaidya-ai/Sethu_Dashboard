@@ -1,8 +1,11 @@
 import React, { useEffect, useState, useRef } from 'react';
 import api from '../services/api';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, User, Bot, Download, Copy, Check, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Tag, Edit2, Save, X, AlertCircle, Phone, RefreshCw } from 'lucide-react';
+import { Phone, Calendar, Clock, MessageSquare, ChevronRight, User, MapPin, Tag, Download, Trash2, ShieldAlert, Check, X, FileText, Info, Edit2, Play, Pause, FastForward, Rewind, Volume2, Search, ExternalLink, Globe } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { STATES, DISTRICTS, MANDALS, VILLAGES } from '../data/india_locations';
+
+const CACHE_KEY = 'session_details_cache';
 import { useAuth } from '../context/AuthContext';
 
 // Global caches for metadata to persist across session navigations
@@ -15,8 +18,10 @@ export default function SessionDetails() {
     const [conversation, setConversation] = useState(null);
     const [session, setSession] = useState(null);
     const [loading, setLoading] = useState(true);
-    const [copied, setCopied] = useState(false);
-    const [downloadOpen, setDownloadOpen] = useState(false);
+    const [reviewing, setReviewing] = useState(false);
+    const [loadingPincode, setLoadingPincode] = useState(false);
+
+    const [isMenuOpen, setIsMenuOpen] = useState(window.innerWidth > 1024);
     const navigate = useNavigate();
     const { isAdmin, user } = useAuth();
     const isMaster = user?.id === 'master_root_0';
@@ -46,6 +51,12 @@ export default function SessionDetails() {
     const [fetchingMetadata, setFetchingMetadata] = useState(false);
     const [statusDropdownOpen, setStatusDropdownOpen] = useState(false);
     const statusDropdownRef = useRef(null);
+
+    // Contact Info state
+    const [contactInfo, setContactInfo] = useState(null);
+    const [editContactMode, setEditContactMode] = useState(false);
+    const [contactForm, setContactForm] = useState({ name: '', village: '', mandal: '', district: '', pincode: '', state: '' });
+    const [savingContact, setSavingContact] = useState(false);
 
     // Close dropdowns on outside click
     const downloadRef = useRef(null);
@@ -124,6 +135,41 @@ export default function SessionDetails() {
         }
     };
 
+    const fetchContactInfo = async (agentId, phone) => {
+        if (!agentId || !phone) return;
+        try {
+            const cleanPhone = phone.replace(/\D/g, '').slice(-10);
+            const res = await api.get(`contacts/${agentId}/${cleanPhone}`);
+            if (res.data?.success && res.data.contact) {
+                setContactInfo(res.data.contact);
+            }
+        } catch (err) {
+            console.error('Failed to fetch contact details:', err);
+        }
+    };
+
+    const saveContactDetails = async () => {
+        setSavingContact(true);
+        try {
+            const agentId = session?.agent_id;
+            let cData = session?.metadata?.custom_data || session?.custom_data;
+            if (typeof cData === 'string' && cData.startsWith('{')) { try { cData = JSON.parse(cData); } catch (e) { } }
+            const originalPhone = session?.phone || session?.customer_phone || (typeof cData === 'object' ? (cData?.phone || cData?.customer_number || cData?.telephony?.from || cData?.number) : '');
+            const cleanPhone = originalPhone.replace(/\D/g, '').slice(-10);
+            
+            const res = await api.post(`contacts/${agentId}/${cleanPhone}`, contactForm);
+            if (res.data?.success) {
+                toast.success('Contact details saved');
+                setContactInfo(res.data.contact);
+                setEditContactMode(false);
+            }
+        } catch (err) {
+            toast.error('Failed to save contact details');
+        } finally {
+            setSavingContact(false);
+        }
+    };
+
     const fetchData = async (showLoading = true) => {
         if (showLoading) setLoading(true);
         try {
@@ -163,6 +209,7 @@ export default function SessionDetails() {
 
                 if (phone) {
                     fetchNumberMetadata(phone);
+                    fetchContactInfo(sessionData.agent_id, phone);
                 }
             } catch (sessErr) { console.error('Error fetching session:', sessErr); }
 
@@ -587,6 +634,32 @@ export default function SessionDetails() {
                                         </div>
                                     </div>
 
+                                    {/* Appended Contact Fields */}
+                                    {contactInfo && !editContactMode && (
+                                        <>
+                                            <div>
+                                                <div style={{ fontSize: '0.65rem', fontWeight: '700', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '4px' }}>Name</div>
+                                                <div style={{ fontSize: '0.9rem', fontWeight: '600', color: '#1e293b' }}>{contactInfo.name || '-'}</div>
+                                            </div>
+                                            <div>
+                                                <div style={{ fontSize: '0.65rem', fontWeight: '700', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '4px' }}>Village</div>
+                                                <div style={{ fontSize: '0.9rem', fontWeight: '600', color: '#1e293b' }}>{contactInfo.village || '-'}</div>
+                                            </div>
+                                            <div>
+                                                <div style={{ fontSize: '0.65rem', fontWeight: '700', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '4px' }}>Mandal</div>
+                                                <div style={{ fontSize: '0.9rem', fontWeight: '600', color: '#1e293b' }}>{contactInfo.mandal || '-'}</div>
+                                            </div>
+                                            <div>
+                                                <div style={{ fontSize: '0.65rem', fontWeight: '700', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '4px' }}>District</div>
+                                                <div style={{ fontSize: '0.9rem', fontWeight: '600', color: '#1e293b' }}>{contactInfo.district || '-'}</div>
+                                            </div>
+                                            <div>
+                                                <div style={{ fontSize: '0.65rem', fontWeight: '700', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '4px' }}>State (Pin Code)</div>
+                                                <div style={{ fontSize: '0.9rem', fontWeight: '600', color: '#1e293b' }}>{contactInfo.state || '-'} {contactInfo.pincode ? `(${contactInfo.pincode})` : ''}</div>
+                                            </div>
+                                        </>
+                                    )}
+
                                     {numberMetadata ? (
                                         <>
                                             <div>
@@ -622,6 +695,166 @@ export default function SessionDetails() {
                                                     </div>
                                                 </div>
                                             )}
+                                        </div>
+                                    )}
+                                </div>
+                                
+                                {/* Edit Contact Details Section */}
+                                <div style={{ marginTop: '0.5rem', paddingTop: '1rem', borderTop: '1px solid #f1f5f9' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: editContactMode ? '1rem' : 0 }}>
+                                        <h4 style={{ fontSize: '0.85rem', color: '#475569', margin: 0 }}>Contact Details</h4>
+                                        <button 
+                                            onClick={() => {
+                                                if (!editContactMode) {
+                                                    setContactForm({
+                                                        name: contactInfo?.name || '',
+                                                        village: contactInfo?.village || '',
+                                                        mandal: contactInfo?.mandal || '',
+                                                        district: contactInfo?.district || '',
+                                                        pincode: contactInfo?.pincode || '',
+                                                        state: contactInfo?.state || ''
+                                                    });
+                                                }
+                                                setEditContactMode(!editContactMode);
+                                            }}
+                                            style={{ fontSize: '0.75rem', color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', fontWeight: '600' }}
+                                        >
+                                            <Edit2 size={12} /> {editContactMode ? 'Cancel' : (contactInfo ? 'Edit' : 'Add Details')}
+                                        </button>
+                                    </div>
+
+                                    {editContactMode && (
+                                        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '12px 10px', marginTop: '15px' }}>
+                                            <div style={{ gridColumn: '1 / -1' }}>
+                                                <label style={{ fontSize: '0.7rem', fontWeight: '700', color: '#94a3b8', textTransform: 'uppercase', marginBottom: '4px', display: 'flex', justifyContent: 'space-between' }}>
+                                                    <span>Full Name <span style={{ color: '#ef4444' }}>*</span></span>
+                                                    <span style={{ fontWeight: '400', fontSize: '0.6rem' }}>REQUIRED</span>
+                                                </label>
+                                                <input 
+                                                    value={contactForm.name} 
+                                                    onChange={e => setContactForm(p => ({ ...p, name: e.target.value }))} 
+                                                    style={{ width: '100%', padding: '10px 14px', borderRadius: '10px', border: '1px solid #e2e8f0', background: '#f8fafc', fontSize: '0.85rem', outline: 'none' }} 
+                                                    placeholder="Full Name" 
+                                                />
+                                            </div>
+
+                                            <div style={{ gridColumn: '1 / -1' }}>
+                                                <label style={{ fontSize: '0.7rem', fontWeight: '700', color: '#94a3b8', textTransform: 'uppercase', marginBottom: '4px', display: 'flex', justifyContent: 'space-between' }}>
+                                                    <span>Pincode (Auto-Fill)</span>
+                                                    {loadingPincode && <span style={{ color: 'var(--primary)', fontSize: '0.65rem' }}>LOOKING UP...</span>}
+                                                </label>
+                                                <input 
+                                                    type="text"
+                                                    maxLength={6}
+                                                    value={contactForm.pincode} 
+                                                    onChange={async (e) => {
+                                                        const val = e.target.value.replace(/\D/g, '').slice(0, 6);
+                                                        setContactForm(p => ({ ...p, pincode: val }));
+                                                        if (val.length === 6) {
+                                                            setLoadingPincode(true);
+                                                            try {
+                                                                const res = await fetch(`https://api.postalpincode.in/pincode/${val}`);
+                                                                const data = await res.json();
+                                                                if (data?.[0]?.Status === "Success") {
+                                                                    const info = data[0].PostOffice[0];
+                                                                    setContactForm(p => ({
+                                                                        ...p,
+                                                                        state: info.State,
+                                                                        district: info.District,
+                                                                        mandal: info.Block || info.Taluk || '',
+                                                                        village: info.Name
+                                                                    }));
+                                                                    toast.success(`Populated from Pincode!`);
+                                                                }
+                                                            } catch (err) { } finally { setLoadingPincode(false); }
+                                                        }
+                                                    }} 
+                                                    style={{ width: '100%', padding: '10px 14px', borderRadius: '10px', border: '2px solid #008F4B', background: '#f0fdf4', fontSize: '0.85rem', fontWeight: '600', outline: 'none' }} 
+                                                    placeholder="6-digit pincode" 
+                                                />
+                                            </div>
+
+                                            {/* Cascading State Dropdown */}
+                                            <div>
+                                                <label style={{ fontSize: '0.7rem', fontWeight: '700', color: '#94a3b8', textTransform: 'uppercase', marginBottom: '4px', display: 'block' }}>State</label>
+                                                <select 
+                                                    value={contactForm.state} 
+                                                    onChange={e => setContactForm(p => ({ ...p, state: e.target.value, district: '', mandal: '', village: '' }))} 
+                                                    style={{ width: '100%', padding: '9px 12px', borderRadius: '10px', border: '1px solid #e2e8f0', background: '#fff', fontSize: '0.85rem', outline: 'none' }}
+                                                >
+                                                    <option value="">Select State</option>
+                                                    {STATES.map(s => <option key={s} value={s}>{s}</option>)}
+                                                    {contactForm.state && !STATES.includes(contactForm.state) && <option value={contactForm.state}>{contactForm.state}</option>}
+                                                </select>
+                                            </div>
+
+                                            {/* Cascading District Dropdown */}
+                                            <div>
+                                                <label style={{ fontSize: '0.7rem', fontWeight: '700', color: '#94a3b8', textTransform: 'uppercase', marginBottom: '4px', display: 'block' }}>District</label>
+                                                <select 
+                                                    value={contactForm.district} 
+                                                    disabled={!contactForm.state}
+                                                    onChange={e => setContactForm(p => ({ ...p, district: e.target.value, mandal: '', village: '' }))}
+                                                    style={{ width: '100%', padding: '9px 12px', borderRadius: '10px', border: '1px solid #e2e8f0', background: !contactForm.state ? '#f1f5f9' : '#fff', fontSize: '0.85rem', outline: 'none' }}
+                                                >
+                                                    <option value="">Select District</option>
+                                                    {(DISTRICTS[contactForm.state] || []).map(d => <option key={d} value={d}>{d}</option>)}
+                                                    {contactForm.district && !(DISTRICTS[contactForm.state] || []).includes(contactForm.district) && <option value={contactForm.district}>{contactForm.district}</option>}
+                                                </select>
+                                            </div>
+
+                                            {/* Searchable Mandal Dropdown */}
+                                            <div>
+                                                <label style={{ fontSize: '0.7rem', fontWeight: '700', color: '#94a3b8', textTransform: 'uppercase', marginBottom: '4px', display: 'block' }}>Mandal</label>
+                                                <input 
+                                                    list="mandal-list-sd"
+                                                    value={contactForm.mandal} 
+                                                    disabled={!contactForm.district}
+                                                    onChange={e => setContactForm(p => ({ ...p, mandal: e.target.value, village: '' }))} 
+                                                    style={{ width: '100%', padding: '9px 12px', borderRadius: '10px', border: '1px solid #e2e8f0', background: !contactForm.district ? '#f1f5f9' : '#fff', fontSize: '0.85rem', outline: 'none' }} 
+                                                    placeholder="Mandal" 
+                                                />
+                                                <datalist id="mandal-list-sd">
+                                                    {(MANDALS[contactForm.district] || []).map(m => <option key={m} value={m} />)}
+                                                </datalist>
+                                            </div>
+
+                                            {/* Searchable Village Dropdown */}
+                                            <div>
+                                                <label style={{ fontSize: '0.7rem', fontWeight: '700', color: '#94a3b8', textTransform: 'uppercase', marginBottom: '4px', display: 'block' }}>Village</label>
+                                                <input 
+                                                    list="village-list-sd"
+                                                    value={contactForm.village} 
+                                                    disabled={!contactForm.mandal}
+                                                    onChange={e => setContactForm(p => ({ ...p, village: e.target.value }))} 
+                                                    style={{ width: '100%', padding: '9px 12px', borderRadius: '10px', border: '1px solid #e2e8f0', background: !contactForm.mandal ? '#f1f5f9' : '#fff', fontSize: '0.85rem', outline: 'none' }} 
+                                                    placeholder="Village" 
+                                                />
+                                                <datalist id="village-list-sd">
+                                                    {(VILLAGES[contactForm.mandal] || []).map(v => <option key={v} value={v} />)}
+                                                </datalist>
+                                            </div>
+
+                                            <div style={{ gridColumn: '1 / -1', marginTop: '4px' }}>
+                                                <button 
+                                                    onClick={saveContactDetails}
+                                                    disabled={savingContact || !contactForm.name}
+                                                    style={{ 
+                                                        width: '100%', 
+                                                        padding: '12px', 
+                                                        background: (!contactForm.name || savingContact) ? '#cbd5e1' : 'var(--primary)', 
+                                                        color: 'white', 
+                                                        border: 'none', 
+                                                        borderRadius: '10px', 
+                                                        fontWeight: '700', 
+                                                        cursor: (!contactForm.name || savingContact) ? 'not-allowed' : 'pointer', 
+                                                        transition: 'all 0.2s',
+                                                        boxShadow: !contactForm.name ? 'none' : '0 4px 12px rgba(0,0,0,0.1)'
+                                                    }}
+                                                >
+                                                    {savingContact ? 'Saving...' : 'Save Contact Details'}
+                                                </button>
+                                            </div>
                                         </div>
                                     )}
                                 </div>
